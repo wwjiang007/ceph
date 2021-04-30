@@ -60,6 +60,18 @@ public:
     laddr_list_t &&extent_lisk) = 0;
 
   /**
+   * Finds unmapped laddr extent of len len
+   */
+  using find_hole_ertr = base_ertr;
+  using find_hole_ret = find_hole_ertr::future<
+    std::pair<laddr_t, extent_len_t>
+    >;
+  virtual find_hole_ret find_hole(
+    Transaction &t,
+    laddr_t hint,
+    extent_len_t) = 0;
+
+  /**
    * Allocates a new mapping referenced by LBARef
    *
    * Offset will be relative to the block offset of the record
@@ -90,6 +102,7 @@ public:
   struct ref_update_result_t {
     unsigned refcount = 0;
     paddr_t addr;
+    extent_len_t length = 0;
   };
   using ref_ertr = base_ertr::extend<
     crimson::ct_error::enoent>;

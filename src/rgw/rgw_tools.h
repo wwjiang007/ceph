@@ -20,7 +20,7 @@ class RGWSysObjectCtx;
 struct RGWObjVersionTracker;
 class optional_yield;
 namespace rgw { namespace sal {
-  class RGWStore;
+  class Store;
 } }
 
 struct obj_version;
@@ -142,10 +142,10 @@ using RGWMD5Etag = RGWEtag<MD5, CEPH_CRYPTO_MD5_DIGESTSIZE>;
 
 class RGWDataAccess
 {
-  rgw::sal::RGWStore *store;
+  rgw::sal::Store* store;
 
 public:
-  RGWDataAccess(rgw::sal::RGWStore *_store);
+  RGWDataAccess(rgw::sal::Store* _store);
 
   class Object;
   class Bucket;
@@ -252,5 +252,10 @@ public:
 };
 
 using RGWDataAccessRef = std::shared_ptr<RGWDataAccess>;
+
+/// Complete an AioCompletion. To return error values or otherwise
+/// satisfy the caller. Useful for making complicated asynchronous
+/// calls and error handling.
+void rgw_complete_aio_completion(librados::AioCompletion* c, int r);
 
 #endif

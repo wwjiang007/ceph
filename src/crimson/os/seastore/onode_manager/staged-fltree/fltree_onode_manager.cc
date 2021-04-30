@@ -2,6 +2,7 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "crimson/os/seastore/onode_manager/staged-fltree/fltree_onode_manager.h"
+#include "crimson/os/seastore/onode_manager/staged-fltree/stages/key_layout.h"
 
 namespace {
 [[maybe_unused]] seastar::logger& logger() {
@@ -41,10 +42,14 @@ FLTreeOnodeManager::get_or_create_onode_ret
 FLTreeOnodeManager::get_or_create_onode(
   Transaction &trans,
   const ghobject_t &hoid) {
+  if (hoid.hobj.oid.name.length() + hoid.hobj.nspace.length()
+      > key_view_t::MAX_NS_OID_LENGTH) {
+    return crimson::ct_error::value_too_large::make();
+  }
   return tree.insert(
     trans, hoid,
     OnodeTree::tree_value_config_t{sizeof(onode_layout_t)}
-  ).safe_then([this, &trans, &hoid](auto p)
+  ).safe_then([&trans, &hoid](auto p)
 	      -> get_or_create_onode_ret {
     auto [cursor, created] = std::move(p);
     auto val = OnodeRef(new FLTreeOnode(cursor.value()));

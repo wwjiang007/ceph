@@ -1,3 +1,6 @@
+.. _cephfs-nfs:
+
+
 =======================
 CephFS Exports over NFS
 =======================
@@ -11,12 +14,14 @@ Requirements
 -  ``nfs-ganesha``, ``nfs-ganesha-ceph``, ``nfs-ganesha-rados-grace`` and
    ``nfs-ganesha-rados-urls`` packages (version 3.3 and above)
 
+.. note:: From Pacific, the nfs mgr module must be enabled prior to use.
+
 Create NFS Ganesha Cluster
 ==========================
 
 .. code:: bash
 
-    $ ceph nfs cluster create <type> <clusterid> [<placement>]
+    $ ceph nfs cluster create <clusterid> [<placement>]
 
 This creates a common recovery pool for all NFS Ganesha daemons, new user based on
 ``clusterid``, and a common NFS Ganesha config RADOS object.
@@ -27,10 +32,6 @@ This creates a common recovery pool for all NFS Ganesha daemons, new user based 
 
    Currently, NFS Ganesha daemon deployed by cephadm listens on the standard
    port. So only one daemon will be deployed on a host.
-
-``<type>`` signifies the export type, which corresponds to the NFS Ganesha file
-system abstraction layer (FSAL). Permissible values are ``"cephfs`` or
-``rgw``, but currently only ``cephfs`` is supported.
 
 ``<clusterid>`` is an arbitrary string by which this NFS Ganesha cluster will be
 known.
@@ -133,8 +134,17 @@ Example use cases
      Squash = None;
      FSAL {
        Name = CEPH;
+       Filesystem = "filesystem name";
+       User_Id = "user id";
+       Secret_Access_Key = "secret key";
      }
    }
+
+.. note:: User specified in FSAL block should have proper caps for NFS-Ganesha
+   daemons to access ceph cluster. User can be created in following way using
+   `auth get-or-create`::
+
+         # ceph auth get-or-create client.<user_id> mon 'allow r' osd 'allow rw pool=nfs-ganesha namespace=<nfs_cluster_name>, allow rw tag cephfs data=<fs_name>' mds 'allow rw path=<export_path>'
 
 Reset NFS Ganesha Configuration
 ===============================

@@ -53,12 +53,24 @@ struct seastore_test_t :
       std::move(t)).get0();
   }
 
+  void set_meta(
+    const std::string& key,
+    const std::string& value) {
+    return seastore->write_meta(key, value).get0();
+  }
+
+  std::tuple<int, std::string> get_meta(
+    const std::string& key) {
+    return seastore->read_meta(key).get();
+  }
+
   struct object_state_t {
     const coll_t cid;
     const CollectionRef coll;
     const ghobject_t oid;
 
     std::map<string, bufferlist> omap;
+    bufferlist contents;
 
     void set_omap(
       CTransaction &t,
@@ -82,6 +94,103 @@ struct seastore_test_t :
       seastore.do_transaction(
 	coll,
 	std::move(t)).get0();
+    }
+
+    void write(
+      SeaStore &seastore,
+      CTransaction &t,
+      uint64_t offset,
+      bufferlist bl)  {
+      bufferlist new_contents;
+      if (offset > 0 && contents.length()) {
+	new_contents.substr_of(
+	  contents,
+	  0,
+	  std::min<size_t>(offset, contents.length())
+	);
+      }
+      new_contents.append_zero(offset - new_contents.length());
+      new_contents.append(bl);
+
+      auto tail_offset = offset + bl.length();
+      if (contents.length() > tail_offset) {
+	bufferlist tail;
+	tail.substr_of(
+	  contents,
+	  tail_offset,
+	  contents.length() - tail_offset);
+	new_contents.append(tail);
+      }
+      contents.swap(new_contents);
+
+      t.write(
+	cid,
+	oid,
+	offset,
+	bl.length(),
+	bl);
+    }
+    void write(
+      SeaStore &seastore,
+      uint64_t offset,
+      bufferlist bl)  {
+      CTransaction t;
+      write(seastore, t, offset, bl);
+      seastore.do_transaction(
+	coll,
+	std::move(t)).get0();
+    }
+    void write(
+      SeaStore &seastore,
+      uint64_t offset,
+      size_t len,
+      char fill)  {
+      auto buffer = bufferptr(buffer::create(len));
+      ::memset(buffer.c_str(), fill, len);
+      bufferlist bl;
+      bl.append(buffer);
+      write(seastore, offset, bl);
+    }
+
+    void read(
+      SeaStore &seastore,
+      uint64_t offset,
+      uint64_t len) {
+      bufferlist to_check;
+      to_check.substr_of(
+	contents,
+	offset,
+	len);
+      auto ret = seastore.read(
+	coll,
+	oid,
+	offset,
+	len).unsafe_get0();
+      EXPECT_EQ(ret.length(), to_check.length());
+      EXPECT_EQ(ret, to_check);
+    }
+
+    void check_size(SeaStore &seastore) {
+      auto st = seastore.stat(
+	coll,
+	oid).get0();
+      EXPECT_EQ(contents.length(), st.st_size);
+    }
+
+    void set_attr_oi(
+      SeaStore &seastore,
+      bufferlist& val) {
+      CTransaction t;
+      t.setattr(cid, oid, OI_ATTR, val);
+      seastore.do_transaction(
+        coll,
+        std::move(t)).get0();
+    }
+
+    SeaStore::attrs_t get_attr_oi(
+      SeaStore &seastore) {
+      return seastore.get_attrs(
+        coll, oid).handle_error(SeaStore::get_attrs_ertr::discard_all{}).get();
     }
 
     void check_omap_key(
@@ -185,6 +294,20 @@ TEST_F(seastore_test_t, collection_create_list_remove)
   });
 }
 
+TEST_F(seastore_test_t, meta) {
+  run_async([this] {
+    set_meta("key1", "value1");
+    set_meta("key2", "value2");
+
+    const auto [ret1, value1] = get_meta("key1");
+    const auto [ret2, value2] = get_meta("key2");
+    EXPECT_EQ(ret1, 0);
+    EXPECT_EQ(ret2, 0);
+    EXPECT_EQ(value1, "value1");
+    EXPECT_EQ(value2, "value2");
+  });
+}
+
 TEST_F(seastore_test_t, touch_stat)
 {
   run_async([this] {
@@ -223,6 +346,23 @@ TEST_F(seastore_test_t, omap_test_simple)
   });
 }
 
+TEST_F(seastore_test_t, attr)
+{
+  run_async([this] {
+    auto& test_obj = get_object(make_oid(0));
+    std::string s("asdfasdfasdf");
+    bufferlist bl;
+    encode(s, bl);
+    test_obj.set_attr_oi(*seastore, bl);
+    auto attrs = test_obj.get_attr_oi(*seastore);
+    std::string s2;
+    bufferlist bl2;
+    bl2.push_back(attrs[OI_ATTR]);
+    decode(s2, bl);
+    EXPECT_EQ(s, s2);
+  });
+}
+
 TEST_F(seastore_test_t, omap_test_iterator)
 {
   run_async([this] {
@@ -239,5 +379,23 @@ TEST_F(seastore_test_t, omap_test_iterator)
 	make_bufferlist(128));
     }
     test_obj.check_omap(*seastore);
+  });
+}
+
+
+TEST_F(seastore_test_t, simple_extent_test)
+{
+  run_async([this] {
+    auto &test_obj = get_object(make_oid(0));
+    test_obj.write(
+      *seastore,
+      1024,
+      1024,
+      'a');
+    test_obj.read(
+      *seastore,
+      1024,
+      1024);
+    test_obj.check_size(*seastore);
   });
 }

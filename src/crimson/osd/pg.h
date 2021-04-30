@@ -5,12 +5,10 @@
 
 #include <memory>
 #include <optional>
-#include <boost/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 #include <boost/smart_ptr/local_shared_ptr.hpp>
 #include <seastar/core/future.hh>
 #include <seastar/core/shared_future.hh>
-#include <seastar/core/sleep.hh>
 
 #include "common/dout.h"
 #include "crimson/net/Fwd.h"
@@ -522,7 +520,6 @@ public:
   load_obc_iertr::future<> with_locked_obc(
     Ref<MOSDOp> &m,
     const OpInfo &op_info,
-    Operation *op,
     with_obc_func_t&& f);
 
   interruptible_future<> handle_rep_op(Ref<MOSDRepOp> m);

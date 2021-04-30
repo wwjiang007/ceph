@@ -708,25 +708,25 @@ PG::do_osd_ops(
     throw crimson::common::system_shutdown_exception();
   }
 
-  using osd_op_ierrorator =
-    OpsExecuter::osd_op_ierrorator;
+  using osd_op_ierrorator = OpsExecuter::osd_op_ierrorator;
+  using osd_op_errorator = OpsExecuter::osd_op_errorator;
   const auto oid = m->get_snapid() == CEPH_SNAPDIR ? m->get_hobj().get_head()
                                                    : m->get_hobj();
   auto ox = std::make_unique<OpsExecuter>(
     obc, op_info, get_pool().info, get_backend(), *m);
   return interruptor::do_for_each(
-    m->ops.begin(), m->ops.end(), [obc, m, ox = ox.get()](OSDOp& osd_op) {
+    m->ops.begin(), m->ops.end(), [m, ox = ox.get()](OSDOp& osd_op) {
     logger().debug(
       "do_osd_ops: {} - object {} - handling op {}",
       *m,
-      obc->obs.oi.soid,
+      ox->get_target(),
       ceph_osd_op_name(osd_op.op.op));
     return ox->execute_op(osd_op);
-  }).safe_then_interruptible([this, obc, m, ox = ox.get(), &op_info] {
+  }).safe_then_interruptible([this, m, ox = ox.get(), &op_info] {
     logger().debug(
       "do_osd_ops: {} - object {} all operations successful",
       *m,
-      obc->obs.oi.soid);
+      ox->get_target());
     return std::move(*ox).flush_changes(
       [this, m, &op_info] (auto&& txn,
 			   auto&& obc,
@@ -735,7 +735,7 @@ PG::do_osd_ops(
 	logger().debug(
 	  "do_osd_ops: {} - object {} submitting txn",
 	  *m,
-	  obc->obs.oi.soid);
+	  obc->get_oid());
         fill_op_params_bump_pg_version(osd_op_p, std::move(m), user_modify);
 	return submit_transaction(
           op_info,
@@ -769,10 +769,10 @@ PG::do_osd_ops(
       return PG::do_osd_ops_ertr::future<Ref<MOSDOpReply>>(
       crimson::ct_error::eagain::make());
     });
-  }), OpsExecuter::osd_op_errorator::all_same_way([ox = std::move(ox),
-                                     m,
-                                     obc,
-                                     this] (const std::error_code& e) {
+  }), osd_op_errorator::all_same_way([ox = std::move(ox),
+                                      m,
+                                      obc,
+                                      this] (const std::error_code& e) {
     return handle_failed_op(e, std::move(obc), *ox, *m);
   }));
 }
@@ -861,22 +861,22 @@ PG::with_head_obc(hobject_t oid, with_obc_func_t&& func)
   logger().debug("{} {}", __func__, oid);
   boost::intrusive_ptr<PG> pgref{this};
   assert(oid.is_head());
-  auto [obc, existed] = shard_services.obc_registry.get_cached_obc(oid);
+  auto [obc, existed] =
+    shard_services.obc_registry.get_cached_obc(std::move(oid));
   obc->append_to(obc_set_accessing);
   return obc->with_lock<State, IOInterruptCondition>(
-    [oid=std::move(oid), existed=existed, obc=obc,
-     func=std::move(func), this] {
+    [existed=existed, obc=obc, func=std::move(func), this] {
     auto loaded = load_obc_iertr::make_ready_future<ObjectContextRef>(obc);
     if (existed) {
-      logger().debug("with_head_obc: found {} in cache", oid);
+      logger().debug("with_head_obc: found {} in cache", obc->get_oid());
     } else {
-      logger().debug("with_head_obc: cache miss on {}", oid);
+      logger().debug("with_head_obc: cache miss on {}", obc->get_oid());
       loaded = obc->with_promoted_lock<State, IOInterruptCondition>([this, obc] {
         return load_head_obc(obc);
       });
     }
     return loaded.safe_then_interruptible([func = std::move(func)](auto obc) {
-      return func(std::move(obc));
+      return std::move(func)(std::move(obc));
     });
   }).finally([this, pgref, obc=std::move(obc)] {
     logger().debug("with_head_obc: released {}", obc->get_oid());
@@ -917,7 +917,7 @@ PG::with_clone_obc(hobject_t oid, with_obc_func_t&& func)
         });
       }
       return loaded.safe_then_interruptible([func = std::move(func)](auto clone) {
-        return func(std::move(clone));
+        return std::move(func)(std::move(clone));
       });
     });
   });
@@ -976,7 +976,7 @@ PG::reload_obc(crimson::osd::ObjectContext& obc) const
 
 PG::load_obc_iertr::future<>
 PG::with_locked_obc(Ref<MOSDOp> &m, const OpInfo &op_info,
-		    Operation *op, PG::with_obc_func_t &&f)
+		    with_obc_func_t &&f)
 {
   if (__builtin_expect(stopping, false)) {
     throw crimson::common::system_shutdown_exception();

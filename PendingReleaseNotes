@@ -9,8 +9,19 @@
   that were storing state in RADOS omap, especially without striping which
   limits scalability.
 
+* RGW: `radosgw-admin realm delete` is now renamed to `radosgw-admin realm rm`. This
+  is consistent with the help message.
+
 >=16.0.0
 --------
+* mgr/nfs: ``nfs`` module is moved out of volumes plugin. Prior using the
+  ``ceph nfs`` commands, ``nfs`` mgr module must be enabled.
+
+* volumes/nfs: The ``cephfs`` cluster type has been removed from the
+  ``nfs cluster create`` subcommand. Clusters deployed by cephadm can
+  support an NFS export of both ``rgw`` and ``cephfs`` from a single
+  NFS cluster instance.
+
 * mgr-pg_autoscaler: Autoscaler will now start out by scaling each
   pool to have a full complements of pgs from the start and will only
   decrease it when other pools need more pgs due to increased usage.
@@ -104,6 +115,15 @@
 
 * Scubs are more aggressive in trying to find more simultaneous possible PGs within osd_max_scrubs limitation.
   It is possible that increasing osd_scrub_sleep may be necessary to maintain client responsiveness.
+
+* Version 2 of the cephx authentication protocol (``CEPHX_V2`` feature bit) is
+  now required by default.  It was introduced in 2018, adding replay attack
+  protection for authorizers and making msgr v1 message signatures stronger
+  (CVE-2018-1128 and CVE-2018-1129).  Support is present in Jewel 10.2.11,
+  Luminous 12.2.6, Mimic 13.2.1, Nautilus 14.2.0 and later; upstream kernels
+  4.9.150, 4.14.86, 4.19 and later; various distribution kernels, in particular
+  CentOS 7.6 and later.  To enable older clients, set ``cephx_require_version``
+  and ``cephx_service_require_version`` config options to 1.
 
 >=15.0.0
 --------

@@ -1466,7 +1466,7 @@ public:
   uint64_t upacting_features = CEPH_FEATURES_SUPPORTED_DEFAULT;
 
   /// most recently consumed osdmap's require_osd_version
-  ceph_release_t last_require_osd_release = ceph_release_t::unknown;
+  ceph_release_t last_require_osd_release;
 
   std::vector<int> want_acting; ///< non-empty while peering needs a new acting set
 
@@ -2314,7 +2314,7 @@ public:
    * applicable stretch cluster constraints.
    */
   bool acting_set_writeable() {
-    return (acting.size() >= pool.info.min_size) &&
+    return (actingset.size() >= pool.info.min_size) &&
       (pool.info.stretch_set_can_peer(acting, *get_osdmap(), NULL));
   }
 

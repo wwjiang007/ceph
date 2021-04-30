@@ -1,9 +1,14 @@
-add_custom_target(civetweb_h
+set(civetweb_h
+  "${CMAKE_BINARY_DIR}/src/include/civetweb/civetweb.h")
+
+add_custom_command(
+  OUTPUT ${civetweb_h}
   COMMAND ${CMAKE_COMMAND} -E make_directory
-  "${CMAKE_BINARY_DIR}/src/include/civetweb"
+    "${CMAKE_BINARY_DIR}/src/include/civetweb"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-  "${CMAKE_SOURCE_DIR}/src/civetweb/include/civetweb.h"
-  "${CMAKE_BINARY_DIR}/src/include/civetweb"
+    "${CMAKE_SOURCE_DIR}/src/civetweb/include/civetweb.h"
+    ${civetweb_h}
+  DEPENDS "${CMAKE_SOURCE_DIR}/src/civetweb/include/civetweb.h"
   COMMENT "keep civetweb.h up-to-date")
 
 find_program(GPERF gperf)
@@ -137,6 +142,7 @@ set(librgw_common_srcs
   rgw_tag.cc
   rgw_tag_s3.cc
   rgw_tools.cc
+  rgw_log_backing.cc
   rgw_user.cc
   rgw_website.cc
   rgw_xml.cc
@@ -156,7 +162,7 @@ set(librgw_common_srcs
   rgw_kms.cc
   rgw_kmip_client.cc
   rgw_url.cc
-  rgw_oidc_provider
+  rgw_oidc_provider.cc
   rgw_datalog.cc
   cls_fifo_legacy.cc
   rgw_lua_utils.cc
@@ -230,7 +236,8 @@ set(rgw_a_srcs
   rgw_usage.cc
   rgw_opa.cc
   rgw_sts.cc
-  rgw_rest_sts.cc)
+  rgw_rest_sts.cc
+  ${civetweb_h})
 
 gperf_generate(${CMAKE_SOURCE_DIR}/src/rgw/rgw_iam_policy_keywords.gperf
   rgw_iam_policy_keywords.frag.cc)
@@ -246,8 +253,6 @@ endif()
 add_library(rgw_a STATIC
     ${rgw_a_srcs}
     $<TARGET_OBJECTS:rgw_common>)
-
-add_dependencies(rgw_a civetweb_h)
 
 target_compile_definitions(rgw_a PUBLIC "-DCLS_CLIENT_HIDE_IOCTX")
 target_include_directories(rgw_a PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
@@ -304,7 +309,8 @@ set(radosgw_srcs
   rgw_loadgen_process.cc
   rgw_civetweb.cc
   rgw_civetweb_frontend.cc
-  rgw_civetweb_log.cc)
+  rgw_civetweb_log.cc
+  ${civetweb_h})
 if (WITH_RADOSGW_FCGI_FRONTEND)
   list(APPEND radosgw_srcs rgw_fcgi_process.cc)
 endif()
@@ -324,8 +330,6 @@ target_link_libraries(rgw_schedulers
 add_library(radosgw SHARED ${radosgw_srcs} ${rgw_a_srcs} rgw_main.cc
   $<TARGET_OBJECTS:rgw_kmip>
   $<TARGET_OBJECTS:civetweb_common_objs>)
-
-add_dependencies(radosgw civetweb_h)
 
 target_compile_definitions(radosgw PUBLIC "-DCLS_CLIENT_HIDE_IOCTX")
 target_include_directories(radosgw PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")

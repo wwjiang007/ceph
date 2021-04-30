@@ -86,74 +86,101 @@ public:
   close_ertr::future<> close();
 
   /// Creates empty transaction
-  TransactionRef create_transaction() {
-    return make_transaction();
+  TransactionRef create_transaction() final {
+    return cache->create_transaction();
   }
 
-  /// Creates weak transaction
+  /// Creates empty weak transaction
   TransactionRef create_weak_transaction() {
-    return make_weak_transaction();
+    return cache->create_weak_transaction();
   }
 
   /**
-   * Read extents corresponding to specified lba range
+   * get_pins
+   *
+   * Get logical pins overlapping offset~length
    */
-  using read_extent_ertr = LBAManager::get_mapping_ertr::extend_ertr<
-    SegmentManager::read_ertr>;
-  template <typename T>
-  using read_extent_ret = read_extent_ertr::future<lextent_list_t<T>>;
-  template <typename T>
-  read_extent_ret<T> read_extents(
+  using get_pins_ertr = LBAManager::get_mapping_ertr;
+  using get_pins_ret = get_pins_ertr::future<lba_pin_list_t>;
+  get_pins_ret get_pins(
     Transaction &t,
     laddr_t offset,
-    extent_len_t length)
-  {
-    std::unique_ptr<lextent_list_t<T>> ret =
-      std::make_unique<lextent_list_t<T>>();
-    auto &ret_ref = *ret;
-    std::unique_ptr<lba_pin_list_t> pin_list =
-      std::make_unique<lba_pin_list_t>();
-    auto &pin_list_ref = *pin_list;
+    extent_len_t length) {
     return lba_manager->get_mapping(
-      t, offset, length
-    ).safe_then([this, &t, &pin_list_ref, &ret_ref](auto pins) {
+      t, offset, length);
+  }
+
+  /**
+   * pin_to_extent
+   *
+   * Get extent mapped at pin.
+   */
+  using pin_to_extent_ertr = get_pins_ertr::extend_ertr<
+    SegmentManager::read_ertr>;
+  template <typename T>
+  using pin_to_extent_ret = pin_to_extent_ertr::future<
+    TCachedExtentRef<T>>;
+  template <typename T>
+  pin_to_extent_ret<T> pin_to_extent(
+    Transaction &t,
+    LBAPinRef pin) {
+    using ret = pin_to_extent_ret<T>;
+    crimson::get_logger(ceph_subsys_filestore).debug(
+      "pin_to_extent: getting extent {}",
+      *pin);
+    return cache->get_extent<T>(
+      t,
+      pin->get_paddr(),
+      pin->get_length()
+    ).safe_then([this, pin=std::move(pin)](auto ref) mutable -> ret {
+      if (!ref->has_pin()) {
+	if (pin->has_been_invalidated() || ref->has_been_invalidated()) {
+	  return crimson::ct_error::eagain::make();
+	} else {
+	  ref->set_pin(std::move(pin));
+	  lba_manager->add_pin(ref->get_pin());
+	}
+      }
       crimson::get_logger(ceph_subsys_filestore).debug(
-	"read_extents: mappings {}",
-	pins);
-      pins.swap(pin_list_ref);
-      return crimson::do_for_each(
-	pin_list_ref.begin(),
-	pin_list_ref.end(),
-	[this, &t, &ret_ref](auto &pin) {
-	  crimson::get_logger(ceph_subsys_filestore).debug(
-	    "read_extents: get_extent {}~{}",
-	    pin->get_paddr(),
-	    pin->get_length());
-	  return cache->get_extent<T>(
-	    t,
-	    pin->get_paddr(),
-	    pin->get_length()
-	  ).safe_then([this, &pin, &ret_ref](auto ref) mutable
-		      -> read_extent_ertr::future<> {
-	    if (!ref->has_pin()) {
-	      if (pin->has_been_invalidated() || ref->has_been_invalidated()) {
-		return crimson::ct_error::eagain::make();
-	      } else {
-		ref->set_pin(std::move(pin));
-		lba_manager->add_pin(ref->get_pin());
-	      }
-	    }
-	    ret_ref.push_back(std::make_pair(ref->get_laddr(), ref));
-	    crimson::get_logger(ceph_subsys_filestore).debug(
-	      "read_extents: got extent {}",
-	      *ref);
-	    return read_extent_ertr::now();
-	  });
-	});
-    }).safe_then([ret=std::move(ret), pin_list=std::move(pin_list)]() mutable {
-      return read_extent_ret<T>(
-	read_extent_ertr::ready_future_marker{},
-	std::move(*ret));
+	"pin_to_extent: got extent {}",
+	*ref);
+      return pin_to_extent_ret<T>(
+	pin_to_extent_ertr::ready_future_marker{},
+	std::move(ref));
+    });
+  }
+
+  /**
+   * read_extent
+   *
+   * Read extent of type T at offset~length
+   */
+  using read_extent_ertr = get_pins_ertr::extend_ertr<
+    SegmentManager::read_ertr>;
+  template <typename T>
+  using read_extent_ret = read_extent_ertr::future<
+    TCachedExtentRef<T>>;
+  template <typename T>
+  read_extent_ret<T> read_extent(
+    Transaction &t,
+    laddr_t offset,
+    extent_len_t length) {
+    return get_pins(
+      t, offset, length
+    ).safe_then([this, &t, offset, length](auto pins) {
+      if (pins.size() != 1 || !pins.front()->get_paddr().is_real()) {
+	auto &logger = crimson::get_logger(ceph_subsys_filestore);
+	logger.error(
+	  "TransactionManager::read_extent offset {} len {} got {} extents:",
+	  offset,
+	  length,
+	  pins.size());
+	for (auto &i: pins) {
+	  logger.error("\t{}", *i);
+	}
+	ceph_assert(0 == "Should be impossible");
+      }
+      return pin_to_extent<T>(t, std::move(pins.front()));
     });
   }
 
@@ -240,6 +267,31 @@ public:
     });
   }
 
+  using reserve_extent_ertr = alloc_extent_ertr;
+  using reserve_extent_ret = reserve_extent_ertr::future<LBAPinRef>;
+  reserve_extent_ret reserve_region(
+    Transaction &t,
+    laddr_t hint,
+    extent_len_t len) {
+    return lba_manager->alloc_extent(
+      t,
+      hint,
+      len,
+      zero_paddr());
+  }
+
+  using find_hole_ertr = LBAManager::find_hole_ertr;
+  using find_hole_ret = LBAManager::find_hole_ret;
+  find_hole_ret find_hole(
+    Transaction &t,
+    laddr_t hint,
+    extent_len_t len) {
+    return lba_manager->find_hole(
+      t,
+      hint,
+      len);
+  }
+
   /* alloc_extents
    *
    * allocates more than one new blocks of type T.
@@ -281,10 +333,14 @@ public:
   submit_transaction_ertr::future<> submit_transaction(TransactionRef);
 
   /// SegmentCleaner::ExtentCallbackInterface
+  using SegmentCleaner::ExtentCallbackInterface::submit_transaction_direct_ret;
+  submit_transaction_direct_ret submit_transaction_direct(
+    TransactionRef t) final;
 
   using SegmentCleaner::ExtentCallbackInterface::get_next_dirty_extents_ret;
   get_next_dirty_extents_ret get_next_dirty_extents(
-    journal_seq_t seq) final;
+    journal_seq_t seq,
+    size_t max_bytes) final;
 
   using SegmentCleaner::ExtentCallbackInterface::rewrite_extent_ret;
   rewrite_extent_ret rewrite_extent(
@@ -316,6 +372,53 @@ public:
   release_segment_ret release_segment(
     segment_id_t id) final {
     return segment_manager.release(id);
+  }
+
+  /**
+   * get_root
+   *
+   * Get root block's ondisk layout
+   */
+  using get_root_ertr = base_ertr;
+  using get_root_ret = get_root_ertr::future<RootBlockRef>;
+  get_root_ret get_root(Transaction &t) {
+    return cache->get_root(t);
+  }
+
+  /**
+   * update_root_meta
+   *
+   * modify root block's meta field
+   */
+  using update_root_meta_ertr = base_ertr::extend<
+    crimson::ct_error::value_too_large>;
+  using update_root_meta_ret = update_root_meta_ertr::future<>;
+  update_root_meta_ret update_root_meta(Transaction& t,
+                                        const std::string& key,
+                                        const std::string& value) {
+    auto root = cache->get_root_fast(t);
+    root = cache->duplicate_for_write(t, root)->cast<RootBlock>();
+    root->meta[key] = value;
+
+    // calculate meta size
+    // TODO: we probably need a uniformal interface for calcuting
+    // the encoded size of data structures
+    uint32_t meta_size = 4; // initial 4 bytes for std::map size
+    for (auto& [key, val] : root->meta) {
+      // sizes of length fields for key and val + sizes of key and val
+      meta_size += 8 + key.length() + val.length();
+    }
+
+    if (meta_size > root_t::MAX_META_LENGTH) {
+      return crimson::ct_error::value_too_large::make();
+    }
+
+    ceph::bufferlist bl(1);
+    bl.rebuild(ceph::buffer::ptr_node::create(
+      &root->get_root().meta[0], root_t::MAX_META_LENGTH));
+    encode(root->meta, bl);
+    root->get_root().have_meta = true;
+    return update_root_meta_ertr::now();
   }
 
   /**
@@ -366,6 +469,10 @@ public:
     auto croot = cache->get_root_fast(t);
     croot = cache->duplicate_for_write(t, croot)->cast<RootBlock>();
     croot->get_root().collection_root.update(cmroot);
+  }
+
+  extent_len_t get_block_size() const {
+    return segment_manager.get_block_size();
   }
 
   ~TransactionManager();

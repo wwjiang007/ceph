@@ -95,6 +95,7 @@
 #include "messages/MOSDPGQuery2.h"
 #include "messages/MOSDPGLog.h"
 #include "messages/MOSDPGRemove.h"
+#include "messages/MOSDPGInfo.h"
 #include "messages/MOSDPGInfo2.h"
 #include "messages/MOSDPGCreate.h"
 #include "messages/MOSDPGCreate2.h"
@@ -7140,6 +7141,8 @@ void OSD::ms_fast_dispatch(Message *m)
     return handle_fast_pg_create(static_cast<MOSDPGCreate2*>(m));
   case MSG_OSD_PG_NOTIFY:
     return handle_fast_pg_notify(static_cast<MOSDPGNotify*>(m));
+  case MSG_OSD_PG_INFO:
+    return handle_fast_pg_info(static_cast<MOSDPGInfo*>(m));
   case MSG_OSD_PG_REMOVE:
     return handle_fast_pg_remove(static_cast<MOSDPGRemove*>(m));
     // these are single-pg messages that handle themselves
@@ -7609,13 +7612,6 @@ void OSD::sched_scrub()
 	continue;
       }
 
-      // If this one couldn't reserve, skip for now
-      if (pg->get_reserve_failed()) {
-	pg->unlock();
-	dout(20) << __func__ << " pg  " << scrub_job.pgid << " reserve failed, skipped" << dendl;
-        continue;
-      }
-
       // This has already started, so go on to the next scrub job
       if (pg->is_scrub_active()) {
 	pg->unlock();
@@ -7635,7 +7631,7 @@ void OSD::sched_scrub()
       if (pg->m_scrubber->is_reserving()) {
 	pg->unlock();
 	dout(10) << __func__ << ": reserve in progress pgid " << scrub_job.pgid << dendl;
-	goto out;
+	break;
       }
       dout(15) << "sched_scrub scrubbing " << scrub_job.pgid << " at " << scrub_job.sched_time
 	       << (pg->get_must_scrub() ? ", explicitly requested" :
@@ -7644,54 +7640,37 @@ void OSD::sched_scrub()
       if (pg->sched_scrub()) {
 	pg->unlock();
         dout(10) << __func__ << " scheduled a scrub!" << " (~" << scrub_job.pgid << "~)" << dendl;
-	goto out;
+	break;
       }
-      // If this is set now we must have had a local reserve failure, so can't scrub anything right now
-      if (pg->get_reserve_failed()) {
-	pg->unlock();
-	dout(20) << __func__ << " pg  " << scrub_job.pgid << " local reserve failed, nothing to be done now" << dendl;
-        goto out;
-      }
-
       pg->unlock();
     } while (service.next_scrub_stamp(scrub_job, &scrub_job));
-
-    // Clear reserve_failed from all pending PGs, so we try again
-    if (service.first_scrub_stamp(&scrub_job)) {
-      do {
-        if (scrub_job.sched_time > now)
-	  break;
-        PGRef pg = _lookup_lock_pg(scrub_job.pgid);
-	// If we can't lock, it's ok we can get it next time
-        if (!pg)
-	  continue;
-        pg->clear_reserve_failed();
-        pg->unlock();
-      } while (service.next_scrub_stamp(scrub_job, &scrub_job));
-    }
   }
-
-out:
   dout(20) << "sched_scrub done" << dendl;
 }
 
 void OSD::resched_all_scrubs()
 {
   dout(10) << __func__ << ": start" << dendl;
-  OSDService::ScrubJob scrub_job;
-  if (service.first_scrub_stamp(&scrub_job)) {
-    do {
-      dout(20) << __func__ << ": examine " << scrub_job.pgid << dendl;
-
-      PGRef pg = _lookup_lock_pg(scrub_job.pgid);
+  const vector<spg_t> pgs = [this] {
+    vector<spg_t> pgs;
+    OSDService::ScrubJob job;
+    if (service.first_scrub_stamp(&job)) {
+      do {
+        pgs.push_back(job.pgid);
+      } while (service.next_scrub_stamp(job, &job));
+    }
+    return pgs;
+  }();
+  for (auto& pgid : pgs) {
+      dout(20) << __func__ << ": examine " << pgid << dendl;
+      PGRef pg = _lookup_lock_pg(pgid);
       if (!pg)
 	continue;
       if (!pg->m_planned_scrub.must_scrub && !pg->m_planned_scrub.need_auto) {
-        dout(15) << __func__ << ": reschedule " << scrub_job.pgid << dendl;
+        dout(15) << __func__ << ": reschedule " << pgid << dendl;
         pg->on_info_history_change();
       }
       pg->unlock();
-    } while (service.next_scrub_stamp(scrub_job, &scrub_job));
   }
   dout(10) << __func__ << ": done" << dendl;
 }
@@ -9376,6 +9355,29 @@ void OSD::handle_fast_pg_notify(MOSDPGNotify* m)
   m->put();
 }
 
+void OSD::handle_fast_pg_info(MOSDPGInfo* m)
+{
+  dout(7) << __func__ << " " << *m << " from " << m->get_source() << dendl;
+  if (!require_osd_peer(m)) {
+    m->put();
+    return;
+  }
+  int from = m->get_source().num();
+  for (auto& p : m->pg_list) {
+    enqueue_peering_evt(
+      spg_t(p.info.pgid.pgid, p.to),
+      PGPeeringEventRef(
+       std::make_shared<PGPeeringEvent>(
+         p.epoch_sent, p.query_epoch,
+         MInfoRec(
+           pg_shard_t(from, p.from),
+           p.info,
+           p.epoch_sent)))
+      );
+  }
+  m->put();
+}
+
 void OSD::handle_fast_pg_remove(MOSDPGRemove *m)
 {
   dout(7) << __func__ << " " << *m << " from " << m->get_source() << dendl;
@@ -10042,14 +10044,14 @@ void OSD::handle_conf_change(const ConfigProxy& conf,
   if (changed.count("osd_client_message_cap")) {
     uint64_t newval = cct->_conf->osd_client_message_cap;
     Messenger::Policy pol = client_messenger->get_policy(entity_name_t::TYPE_CLIENT);
-    if (pol.throttler_messages && newval > 0) {
+    if (pol.throttler_messages) {
       pol.throttler_messages->reset_max(newval);
     }
   }
   if (changed.count("osd_client_message_size_cap")) {
     uint64_t newval = cct->_conf->osd_client_message_size_cap;
     Messenger::Policy pol = client_messenger->get_policy(entity_name_t::TYPE_CLIENT);
-    if (pol.throttler_bytes && newval > 0) {
+    if (pol.throttler_bytes) {
       pol.throttler_bytes->reset_max(newval);
     }
   }

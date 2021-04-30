@@ -158,9 +158,9 @@ private:
     return seastar::do_with(
       internal_context_t{ ch, std::move(t) },
       std::forward<F>(f),
-      [](auto &ctx, auto &f) {
+      [this](auto &ctx, auto &f) {
 	return repeat_eagain([&]() {
-	  ctx.reset(make_transaction());
+	  ctx.reset(transaction_manager->create_transaction());
 	  return std::invoke(f, ctx);
 	}).handle_error(
 	  crimson::ct_error::eagain::pass_further{},
@@ -184,7 +184,7 @@ private:
       std::forward<F>(f),
       [=](auto &oid, auto &ret, auto &t, auto &onode, auto &f) {
 	return repeat_eagain([&, this] {
-	  t = make_transaction();
+	  t = transaction_manager->create_transaction();
 	  return onode_manager->get_onode(
 	    *t, oid
 	  ).safe_then([&, this](auto onode_ret) {
@@ -228,7 +228,8 @@ private:
   tm_ret _write(
     internal_context_t &ctx,
     OnodeRef &onode,
-    uint64_t offset, size_t len, const ceph::bufferlist& bl,
+    uint64_t offset, size_t len,
+    ceph::bufferlist &&bl,
     uint32_t fadvise_flags);
   tm_ret _omap_set_values(
     internal_context_t &ctx,
@@ -237,23 +238,23 @@ private:
   tm_ret _omap_set_header(
     internal_context_t &ctx,
     OnodeRef &onode,
-    const ceph::bufferlist &header);
+    ceph::bufferlist &&header);
   tm_ret _omap_rmkeys(
     internal_context_t &ctx,
     OnodeRef &onode,
-    const omap_keys_t& aset);
+    omap_keys_t &&aset);
   tm_ret _omap_rmkeyrange(
     internal_context_t &ctx,
     OnodeRef &onode,
-    const std::string &first,
-    const std::string &last);
+    std::string first,
+    std::string last);
   tm_ret _truncate(
     internal_context_t &ctx,
     OnodeRef &onode, uint64_t size);
   tm_ret _setattrs(
     internal_context_t &ctx,
     OnodeRef &onode,
-    std::map<std::string,bufferptr>& aset);
+    std::map<std::string,bufferptr> &&aset);
   tm_ret _create_collection(
     internal_context_t &ctx,
     const coll_t& cid, int bits);

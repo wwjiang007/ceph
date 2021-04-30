@@ -736,11 +736,13 @@ $COSDSHORT
         $(format_conf "${extra_conf}")
 [mon]
         mgr initial modules = $mgr_modules
+        mgr disabled modules = rook
 $DAEMONOPTS
 $CMONDEBUG
         $(format_conf "${extra_conf}")
         mon cluster log file = $CEPH_OUT_DIR/cluster.mon.\$id.log
         osd pool default erasure code profile = plugin=jerasure technique=reed_sol_van k=2 m=1 crush-failure-domain=osd
+        auth allow insecure global id reclaim = false
 EOF
 }
 
@@ -1140,7 +1142,7 @@ start_ganesha() {
     ceph_adm mgr module enable test_orchestrator
     ceph_adm orch set backend test_orchestrator
     ceph_adm test_orchestrator load_data -i $CEPH_ROOT/src/pybind/mgr/test_orchestrator/dummy_data.json
-    prun ceph_adm nfs cluster create cephfs $cluster_id
+    prun ceph_adm nfs cluster create $cluster_id
     prun ceph_adm nfs export create cephfs "a" $cluster_id "/cephfs"
 
     for name in a b c d e f g h i j k l m n o p
@@ -1201,15 +1203,11 @@ EOF
 
         prun env CEPH_CONF="${conf_fn}" ganesha-rados-grace --userid $test_user -p $pool_name -n $namespace
 
-        if $with_mgr_dashboard; then
-            $CEPH_BIN/rados -p $pool_name put "conf-$name" "$ganesha_dir/ganesha-$name.conf"
-        fi
-
         echo "$test_user ganesha daemon $name started on port: $port"
     done
 
     if $with_mgr_dashboard; then
-        ceph_adm dashboard set-ganesha-clusters-rados-pool-namespace $pool_name
+        ceph_adm dashboard set-ganesha-clusters-rados-pool-namespace "$cluster_id:$pool_name/$cluster_id"
     fi
 }
 
@@ -1425,9 +1423,10 @@ fi
 # Ganesha Daemons
 if [ $GANESHA_DAEMON_NUM -gt 0 ]; then
     pseudo_path="/cephfs"
+    ceph_adm mgr module enable nfs
     if [ "$cephadm" -gt 0 ]; then
         cluster_id="vstart"
-        prun ceph_adm nfs cluster create cephfs $cluster_id
+        prun ceph_adm nfs cluster create $cluster_id
         prun ceph_adm nfs export create cephfs "a" $cluster_id $pseudo_path
         port="2049"
     else

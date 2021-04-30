@@ -60,7 +60,7 @@ WebTokenEngine::get_role_tenant(const string& role_arn) const
   return tenant;
 }
 
-boost::optional<RGWOIDCProvider>
+std::unique_ptr<rgw::sal::RGWOIDCProvider>
 WebTokenEngine::get_provider(const DoutPrefixProvider *dpp, const string& role_arn, const string& iss) const
 {
   string tenant = get_role_tenant(role_arn);
@@ -82,10 +82,12 @@ WebTokenEngine::get_provider(const DoutPrefixProvider *dpp, const string& role_a
   }
   auto provider_arn = rgw::ARN(idp_url, "oidc-provider", tenant);
   string p_arn = provider_arn.to_string();
-  RGWOIDCProvider provider(cct, store, p_arn, tenant);
-  auto ret = provider.get(dpp);
+  std::unique_ptr<rgw::sal::RGWOIDCProvider> provider = store->get_oidc_provider();
+  provider->set_arn(p_arn);
+  provider->set_tenant(tenant);
+  auto ret = provider->get(dpp);
   if (ret < 0) {
-    return boost::none;
+    return nullptr;
   }
   return provider;
 }
@@ -368,7 +370,7 @@ int RGWREST_STS::verify_permission(optional_yield y)
     ldpp_dout(this, 0) << "failed to get role info using role arn: " << rArn << dendl;
     return ret;
   }
-  string policy = role.get_assume_role_policy();
+  string policy = role->get_assume_role_policy();
   buffer::list bl = buffer::list::static_from_string(policy);
 
   //Parse the policy
@@ -582,7 +584,7 @@ void RGWSTSAssumeRole::execute(optional_yield y)
 }
 
 int RGW_Auth_STS::authorize(const DoutPrefixProvider *dpp,
-                            rgw::sal::RGWStore *store,
+                            rgw::sal::Store* store,
                             const rgw::auth::StrategyRegistry& auth_registry,
                             struct req_state *s, optional_yield y)
 {
@@ -628,7 +630,7 @@ RGWOp *RGWHandler_REST_STS::op_post()
   return nullptr;
 }
 
-int RGWHandler_REST_STS::init(rgw::sal::RGWStore *store,
+int RGWHandler_REST_STS::init(rgw::sal::Store* store,
                               struct req_state *s,
                               rgw::io::BasicClient *cio)
 {
@@ -693,7 +695,7 @@ int RGWHandler_REST_STS::init_from_header(struct req_state* s,
 }
 
 RGWHandler_REST*
-RGWRESTMgr_STS::get_handler(rgw::sal::RGWStore *store,
+RGWRESTMgr_STS::get_handler(rgw::sal::Store* store,
 			    struct req_state* const s,
 			    const rgw::auth::StrategyRegistry& auth_registry,
 			    const std::string& frontend_prefix)

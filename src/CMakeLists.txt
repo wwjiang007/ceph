@@ -22,6 +22,55 @@ set(pkgdatadir ${CMAKE_INSTALL_FULL_DATADIR})
 set(datadir ${CEPH_INSTALL_DATADIR})
 set(prefix ${CMAKE_INSTALL_PREFIX})
 
+configure_file(${CMAKE_SOURCE_DIR}/src/init-ceph.in
+  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/init-ceph @ONLY)
+
+configure_file(ceph-post-file.in
+  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-post-file @ONLY)
+
+configure_file(ceph-crash.in
+  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-crash @ONLY)
+
+# the src/.git_version file may be written out by make-dist; otherwise
+# we pull the git version from .git
+option(ENABLE_GIT_VERSION "build Ceph with git version string" ON)
+if(ENABLE_GIT_VERSION)
+  get_git_head_revision(GIT_REFSPEC CEPH_GIT_VER)
+  git_describe(CEPH_GIT_NICE_VER_WITH_V --always)
+  # remove leading 'v'
+  string(SUBSTRING ${CEPH_GIT_NICE_VER_WITH_V} 1 -1 CEPH_GIT_NICE_VER)
+  #if building from a source tarball via make-dist
+  if(${CEPH_GIT_VER} STREQUAL "GITDIR-NOTFOUND")
+    message(STATUS "Ceph/.git directory not found, parsing ${CMAKE_CURRENT_SOURCE_DIR}/.git_version for CEPH_GIT_VER and CEPH_GIT_NICE_VER")
+    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/.git_version CEPH_GIT_SHA_AND_TAG)
+    list(GET CEPH_GIT_SHA_AND_TAG 0 CEPH_GIT_VER)
+    list(GET CEPH_GIT_SHA_AND_TAG 1 CEPH_GIT_NICE_VER)
+  endif(${CEPH_GIT_VER} STREQUAL "GITDIR-NOTFOUND")
+else(ENABLE_GIT_VERSION)
+  set(CEPH_GIT_VER "no_version")
+  set(CEPH_GIT_NICE_VER "Development")
+endif(ENABLE_GIT_VERSION)
+
+# the src/ceph_release file is 3 lines,
+#   <release number, e.g. '12' for luminous>
+#   <release name, e.g. 'luminous'>
+#   <release type: 'dev' for x.0.z, 'rc' or x.1.z, or 'stable' or x.2.z>
+# note that the release name is semi-redundant and must match CEPH_RELEASE_*
+# definitions in include/rados.h and common/ceph_strings.c.
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/ceph_release CEPH_RELEASE_FILE)
+list(GET CEPH_RELEASE_FILE 0 CEPH_RELEASE)
+list(GET CEPH_RELEASE_FILE 1 CEPH_RELEASE_NAME)
+list(GET CEPH_RELEASE_FILE 2 CEPH_RELEASE_TYPE)
+
+configure_file(${CMAKE_SOURCE_DIR}/src/ceph.in
+  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph @ONLY)
+
+# Common infrastructure
+configure_file(
+  ${CMAKE_SOURCE_DIR}/src/ceph_ver.h.in.cmake
+  ${CMAKE_BINARY_DIR}/src/include/ceph_ver.h
+  @ONLY)
+
 add_definitions(
   -DHAVE_CONFIG_H
   -D__CEPH__
@@ -217,38 +266,13 @@ if(${ENABLE_COVERAGE})
   list(APPEND EXTRALIBS gcov)
 endif(${ENABLE_COVERAGE})
 
-set(GCOV_PREFIX_STRIP 4)
-
-# the src/.git_version file may be written out by make-dist; otherwise
-# we pull the git version from .git
-option(ENABLE_GIT_VERSION "build Ceph with git version string" ON)
-if(${ENABLE_GIT_VERSION})
-  get_git_head_revision(GIT_REFSPEC CEPH_GIT_VER)
-  git_describe(CEPH_GIT_NICE_VER_WITH_V --always)
-  # remove leading 'v'
-  string(SUBSTRING ${CEPH_GIT_NICE_VER_WITH_V} 1 -1 CEPH_GIT_NICE_VER)
-  #if building from a source tarball via make-dist
-  if(${CEPH_GIT_VER} STREQUAL "GITDIR-NOTFOUND")
-    message(STATUS "Ceph/.git directory not found, parsing ${CMAKE_CURRENT_SOURCE_DIR}/.git_version for CEPH_GIT_VER and CEPH_GIT_NICE_VER")
-    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/.git_version CEPH_GIT_SHA_AND_TAG)
-    list(GET CEPH_GIT_SHA_AND_TAG 0 CEPH_GIT_VER)
-    list(GET CEPH_GIT_SHA_AND_TAG 1 CEPH_GIT_NICE_VER)
-  endif(${CEPH_GIT_VER} STREQUAL "GITDIR-NOTFOUND")
-else(${ENABLE_GIT_VERSION})
-  set(CEPH_GIT_VER "no_version")
-  set(CEPH_GIT_NICE_VER "Development")
-endif(${ENABLE_GIT_VERSION})
-
-# the src/ceph_release file is 3 lines,
-#   <release number, e.g. '12' for luminous>
-#   <release name, e.g. 'luminous'>
-#   <release type: 'dev' for x.0.z, 'rc' or x.1.z, or 'stable' or x.2.z>
-# note that the release name is semi-redundant and must match CEPH_RELEASE_*
-# definitions in include/rados.h and common/ceph_strings.c.
-file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/ceph_release CEPH_RELEASE_FILE)
-list(GET CEPH_RELEASE_FILE 0 CEPH_RELEASE)
-list(GET CEPH_RELEASE_FILE 1 CEPH_RELEASE_NAME)
-list(GET CEPH_RELEASE_FILE 2 CEPH_RELEASE_TYPE)
+if(WITH_TESTS)
+  set(GCOV_PREFIX_STRIP 4)
+  configure_file(${CMAKE_SOURCE_DIR}/src/ceph-coverage.in
+    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-coverage @ONLY)
+  configure_file(${CMAKE_SOURCE_DIR}/src/ceph-debugpack.in
+    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-debugpack @ONLY)
+endif()
 
 option(WITH_OCF "build OCF-compliant cluster resource agent" OFF)
 if(WITH_OCF)
@@ -284,12 +308,6 @@ endif()
 if (WITH_BLKIN)
   add_subdirectory(blkin/blkin-lib)
 endif(WITH_BLKIN)
-
-# Common infrastructure
-configure_file(
-  ${CMAKE_SOURCE_DIR}/src/ceph_ver.h.in.cmake
-  ${CMAKE_BINARY_DIR}/src/include/ceph_ver.h
-  @ONLY)
 
 set(mds_files)
 list(APPEND mds_files
@@ -399,6 +417,7 @@ endif()
 set_source_files_properties(ceph_ver.c
   APPEND PROPERTY OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/src/include/ceph_ver.h)
 add_library(common-objs OBJECT ${libcommon_files})
+add_dependencies(common-objs legacy-option-headers)
 
 if(WITH_JAEGER)
   find_package(yaml-cpp 0.6.0)
@@ -447,6 +466,7 @@ add_subdirectory(arch)
 set(ceph_common_objs
   $<TARGET_OBJECTS:common-auth-objs>
   $<TARGET_OBJECTS:common-common-objs>
+  $<TARGET_OBJECTS:common-options-objs>
   $<TARGET_OBJECTS:common-msg-objs>
   $<TARGET_OBJECTS:common_buffer_obj>
   $<TARGET_OBJECTS:common_texttable_obj>
@@ -463,7 +483,6 @@ set(ceph_common_deps
   Boost::program_options
   Boost::date_time
   Boost::iostreams
-  fmt::fmt
   StdFilesystem::filesystem
   fmt::fmt
   ${BLKID_LIBRARIES}
@@ -508,12 +527,14 @@ endif()
 
 if(WITH_BLUESTORE_PMEM OR WITH_RBD_RWL)
   if(WITH_SYSTEM_PMDK)
+    set(pmem_COMPONENTS)
     if(WITH_BLUESTORE_PMEM)
-      find_package(pmem REQUIRED COMPONENTS pmem)
+      list(APPEND pmem_COMPONENTS pmem)
     endif()
     if(WITH_RBD_RWL)
-      find_package(pmem REQUIRED COMPONENTS pmemobj)
+      list(APPEND pmem_COMPONENTS pmemobj)
     endif()
+    find_package(pmem 1.10 REQUIRED COMPONENTS ${pmem_COMPONENTS})
   else()
     include(Buildpmem)
     build_pmem()
@@ -720,25 +741,6 @@ endif()
 add_subdirectory(crypto)
 
 if(WITH_TESTS)
-  configure_file(${CMAKE_SOURCE_DIR}/src/ceph-coverage.in
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-coverage @ONLY)
-  configure_file(${CMAKE_SOURCE_DIR}/src/ceph-debugpack.in
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-debugpack @ONLY)
-endif()
-
-configure_file(${CMAKE_SOURCE_DIR}/src/ceph.in
-  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph @ONLY)
-
-configure_file(${CMAKE_SOURCE_DIR}/src/init-ceph.in
-  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/init-ceph @ONLY)
-
-configure_file(ceph-post-file.in
-  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-post-file @ONLY)
-
-configure_file(ceph-crash.in
-  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-crash @ONLY)
-
-if(WITH_TESTS)
   install(PROGRAMS
     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-debugpack
     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-coverage
@@ -811,6 +813,13 @@ if(WITH_LIBCEPHSQLITE)
   set(cephsqlite_srcs libcephsqlite.cc SimpleRADOSStriper.cc)
   add_library(cephsqlite ${CEPH_SHARED} ${cephsqlite_srcs})
   target_link_libraries(cephsqlite PRIVATE cls_lock_client librados ceph-common SQLite3::SQLite3 ${EXTRALIBS})
+  set_target_properties(cephsqlite PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+  if(NOT APPLE AND NOT WIN32)
+    set_property(TARGET cephsqlite APPEND_STRING PROPERTY
+      LINK_FLAGS " -Wl,--exclude-libs,ALL")
+  endif()
   install(TARGETS cephsqlite DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif(WITH_LIBCEPHSQLITE)
 
@@ -948,6 +957,7 @@ add_custom_target(cephfs_testing DEPENDS
     cls_cephfs
     ceph-fuse
     ceph-dencoder
+    ceph-dencoder-modules
     cephfs-journal-tool
     cephfs-meta-injection
     cephfs-data-scan

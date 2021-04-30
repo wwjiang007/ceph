@@ -195,7 +195,7 @@ auto call_with_interruption(
 
 template <typename InterruptCond, typename Func, typename... T,
 	  typename Result = std::invoke_result_t<Func, T...>>
-decltype(auto) non_futurized_call_with_interruption(
+Result non_futurized_call_with_interruption(
   InterruptCondRef<InterruptCond> interrupt_condition,
   Func&& func, T&&... args)
 {
@@ -273,7 +273,7 @@ public:
   [[gnu::always_inline]]
   auto handle_interruption(Func&& func) {
     return core_type::then_wrapped(
-      [this, func=std::move(func),
+      [func=std::move(func),
       interrupt_condition=interrupt_cond<InterruptCond>](auto&& fut) mutable {
       if (fut.failed()) {
 	std::exception_ptr ex = fut.get_exception();

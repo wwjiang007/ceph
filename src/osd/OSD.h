@@ -86,6 +86,7 @@ class LogChannel;
 
 class MOSDPGCreate2;
 class MOSDPGNotify;
+class MOSDPGInfo;
 class MOSDPGRemove;
 class MOSDForceRecovery;
 class MMonGetPurgedSnapsReply;
@@ -317,10 +318,7 @@ public:
     std::lock_guard l(sched_scrub_lock);
     if (sched_scrub_pg.empty())
       return false;
-    std::set<ScrubJob>::const_iterator iter = sched_scrub_pg.lower_bound(next);
-    if (iter == sched_scrub_pg.cend())
-      return false;
-    ++iter;
+    std::set<ScrubJob>::const_iterator iter = sched_scrub_pg.upper_bound(next);
     if (iter == sched_scrub_pg.cend())
       return false;
     *out = *iter;
@@ -1919,6 +1917,7 @@ protected:
   void handle_pg_query_nopg(const MQuery& q);
   void handle_fast_pg_notify(MOSDPGNotify *m);
   void handle_pg_notify_nopg(const MNotifyRec& q);
+  void handle_fast_pg_info(MOSDPGInfo *m);
   void handle_fast_pg_remove(MOSDPGRemove *m);
 
 public:

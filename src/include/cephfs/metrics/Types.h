@@ -367,6 +367,10 @@ struct UnknownPayload {
   }
 
   void decode(bufferlist::const_iterator &iter) {
+    using ceph::decode;
+    DECODE_START(254, iter);
+    iter.seek(struct_len);
+    DECODE_FINISH(iter);
   }
 
   void dump(Formatter *f) const {
@@ -448,7 +452,7 @@ public:
     template <typename ClientMetricPayload>
     inline void operator()(const ClientMetricPayload &payload) const {
       ClientMetricType metric_type = ClientMetricPayload::METRIC_TYPE;
-      *_out << "[client_metric_type: " << metric_type;
+      *_out << "[client_metric_type: " << metric_type << " ";
       payload.print(_out);
       *_out << "]";
     }

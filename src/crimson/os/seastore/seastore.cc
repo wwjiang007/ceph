@@ -19,6 +19,7 @@
 #include "crimson/os/seastore/omap_manager/btree/btree_omap_manager.h"
 #include "crimson/os/seastore/segment_manager/ephemeral.h"
 #include "crimson/os/seastore/onode_manager.h"
+#include "crimson/os/seastore/object_data_handler.h"
 
 namespace {
   seastar::logger& logger() {
@@ -69,7 +70,7 @@ seastar::future<> SeaStore::mkfs(uuid_d new_osd_fsid)
   return transaction_manager->mkfs(
   ).safe_then([this] {
     return seastar::do_with(
-      make_transaction(),
+      transaction_manager->create_transaction(),
       [this](auto &t) {
 	return onode_manager->mkfs(*t
 	).safe_then([this, &t] {
@@ -138,7 +139,7 @@ seastar::future<std::vector<coll_t>> SeaStore::list_collections()
       return repeat_eagain([this, &ret] {
 
 	return seastar::do_with(
-	  make_transaction(),
+	  transaction_manager->create_transaction(),
 	  [this, &ret](auto &t) {
 	    return transaction_manager->read_collection_root(*t
 	    ).safe_then([this, &ret, &t](auto coll_root) {
@@ -169,7 +170,19 @@ SeaStore::read_errorator::future<ceph::bufferlist> SeaStore::read(
   size_t len,
   uint32_t op_flags)
 {
-  return read_errorator::make_ready_future<ceph::bufferlist>();
+  return repeat_with_onode<ceph::bufferlist>(
+    ch,
+    oid,
+    [=](auto &t, auto &onode) {
+      return ObjectDataHandler().read(
+	ObjectDataHandler::context_t{
+	  *transaction_manager,
+	  t,
+	  onode,
+	},
+	offset,
+	len);
+    });
 }
 
 SeaStore::read_errorator::future<ceph::bufferlist> SeaStore::readv(
@@ -199,7 +212,17 @@ SeaStore::get_attrs_ertr::future<SeaStore::attrs_t> SeaStore::get_attrs(
   auto c = static_cast<SeastoreCollection*>(ch.get());
   logger().debug("{} {} {}",
 		 __func__, c->get_cid(), oid);
-  return crimson::ct_error::enoent::make();
+  return repeat_with_onode<attrs_t>(
+    c, oid, [=](auto &t, auto& onode) {
+    auto& layout = onode.get_layout();
+    SeaStore::attrs_t attrs;
+    attrs[OI_ATTR] = ceph::bufferptr(&layout.oi[0], layout.oi_size);
+    attrs[SS_ATTR] = ceph::bufferptr(&layout.ss[0], layout.ss_size);
+    return attrs;
+  }).handle_error(crimson::ct_error::input_output_error::handle([this] {
+    logger().error("EIO when getting attrs");
+    abort();
+  }), crimson::ct_error::pass_further_all{});
 }
 
 seastar::future<struct stat> SeaStore::stat(
@@ -213,10 +236,10 @@ seastar::future<struct stat> SeaStore::stat(
       struct stat st;
       auto &olayout = onode.get_layout();
       st.st_size = olayout.size;
-      st.st_blksize = 4096;
+      st.st_blksize = transaction_manager->get_block_size();
       st.st_blocks = (st.st_size + st.st_blksize - 1) / st.st_blksize;
       st.st_nlink = 1;
-      return seastar::make_ready_future<struct stat>();
+      return seastar::make_ready_future<struct stat>(st);
     }).handle_error(
       crimson::ct_error::assert_all{
 	"Invalid error in SeaStore::stat"
@@ -529,7 +552,9 @@ SeaStore::tm_ret SeaStore::_do_transaction_step(
       uint32_t fadvise_flags = i.get_fadvise_flags();
       ceph::bufferlist bl;
       i.decode_bl(bl);
-      return _write(ctx, get_onode(op->oid), off, len, bl, fadvise_flags);
+      return _write(
+	ctx, get_onode(op->oid), off, len, std::move(bl),
+	fadvise_flags);
     }
     break;
     case Transaction::OP_TRUNCATE:
@@ -545,7 +570,7 @@ SeaStore::tm_ret SeaStore::_do_transaction_step(
       i.decode_bl(bl);
       std::map<std::string, bufferptr> to_set;
       to_set[name] = bufferptr(bl.c_str(), bl.length());
-      return _setattrs(ctx, get_onode(op->oid), to_set);
+      return _setattrs(ctx, get_onode(op->oid), std::move(to_set));
     }
     break;
     case Transaction::OP_MKCOLL:
@@ -571,14 +596,14 @@ SeaStore::tm_ret SeaStore::_do_transaction_step(
     {
       ceph::bufferlist bl;
       i.decode_bl(bl);
-      return _omap_set_header(ctx, get_onode(op->oid), bl);
+      return _omap_set_header(ctx, get_onode(op->oid), std::move(bl));
     }
     break;
     case Transaction::OP_OMAP_RMKEYS:
     {
       omap_keys_t keys;
       i.decode_keyset(keys);
-      return _omap_rmkeys(ctx, get_onode(op->oid), keys);
+      return _omap_rmkeys(ctx, get_onode(op->oid), std::move(keys));
     }
     break;
     case Transaction::OP_OMAP_RMKEYRANGE:
@@ -586,7 +611,9 @@ SeaStore::tm_ret SeaStore::_do_transaction_step(
       string first, last;
       first = i.decode_string();
       last = i.decode_string();
-      return _omap_rmkeyrange(ctx, get_onode(op->oid), first, last);
+      return _omap_rmkeyrange(
+	ctx, get_onode(op->oid),
+	std::move(first), std::move(last));
     }
     break;
     case Transaction::OP_COLL_HINT:
@@ -626,13 +653,30 @@ SeaStore::tm_ret SeaStore::_touch(
 SeaStore::tm_ret SeaStore::_write(
   internal_context_t &ctx,
   OnodeRef &onode,
-  uint64_t offset, size_t len, const ceph::bufferlist& bl,
+  uint64_t offset, size_t len,
+  ceph::bufferlist &&_bl,
   uint32_t fadvise_flags)
 {
-  logger().debug("{}: {} {} ~ {}",
+  logger().debug("SeaStore::{}: {} {} ~ {}",
                 __func__, *onode, offset, len);
-  assert(len == bl.length());
-  return tm_ertr::now();
+  {
+    auto &object_size = onode->get_mutable_layout(*ctx.transaction).size;
+    object_size = std::max<uint64_t>(
+      offset + len,
+      object_size);
+  }
+  return seastar::do_with(
+    std::move(_bl),
+    [=, &ctx, &onode](auto &bl) {
+      return ObjectDataHandler().write(
+	ObjectDataHandler::context_t{
+	  *transaction_manager,
+	  *ctx.transaction,
+	  *onode,
+	},
+	offset,
+	bl);
+    });
 }
 
 SeaStore::tm_ret SeaStore::_omap_set_values(
@@ -685,7 +729,7 @@ SeaStore::tm_ret SeaStore::_omap_set_values(
 SeaStore::tm_ret SeaStore::_omap_set_header(
   internal_context_t &ctx,
   OnodeRef &onode,
-  const ceph::bufferlist &header)
+  ceph::bufferlist &&header)
 {
   logger().debug(
     "{}: {} {} bytes",
@@ -697,7 +741,7 @@ SeaStore::tm_ret SeaStore::_omap_set_header(
 SeaStore::tm_ret SeaStore::_omap_rmkeys(
   internal_context_t &ctx,
   OnodeRef &onode,
-  const omap_keys_t& keys)
+  omap_keys_t &&keys)
 {
   logger().debug(
     "{} {} {} keys",
@@ -709,9 +753,11 @@ SeaStore::tm_ret SeaStore::_omap_rmkeys(
     return seastar::do_with(
       BtreeOMapManager(*transaction_manager),
       onode->get_layout().omap_root.get(),
-      [&ctx, &onode, &keys, this](
+      std::move(keys),
+      [&ctx, &onode, this](
 	auto &omap_manager,
-	auto &omap_root) {
+	auto &omap_root,
+	auto &keys) {
 	return crimson::do_for_each(
 	  keys.begin(),
 	  keys.end(),
@@ -733,8 +779,8 @@ SeaStore::tm_ret SeaStore::_omap_rmkeys(
 SeaStore::tm_ret SeaStore::_omap_rmkeyrange(
   internal_context_t &ctx,
   OnodeRef &onode,
-  const std::string &first,
-  const std::string &last)
+  std::string first,
+  std::string last)
 {
   logger().debug(
     "{} {} first={} last={}",
@@ -748,18 +794,50 @@ SeaStore::tm_ret SeaStore::_truncate(
   OnodeRef &onode,
   uint64_t size)
 {
-  logger().debug("{} onode={} size={}",
+  logger().debug("SeaStore::{} onode={} size={}",
                 __func__, *onode, size);
-  return tm_ertr::now();
+  onode->get_mutable_layout(*ctx.transaction).size = size;
+  return ObjectDataHandler().truncate(
+    ObjectDataHandler::context_t{
+      *transaction_manager,
+      *ctx.transaction,
+      *onode
+    },
+    size);
 }
 
 SeaStore::tm_ret SeaStore::_setattrs(
   internal_context_t &ctx,
   OnodeRef &onode,
-  std::map<std::string,bufferptr>& aset)
+  std::map<std::string,bufferptr> &&aset)
 {
   logger().debug("{} onode={}",
                 __func__, *onode);
+  auto& layout = onode->get_mutable_layout(*ctx.transaction);
+  for (auto& [key, val] : aset) {
+    if (key == OI_ATTR) {
+      if (__builtin_expect(
+          val.length() > onode_layout_t::MAX_OI_LENGTH,
+          false)) {
+        logger().error("{} onode={} oi attr too long!");
+        return crimson::ct_error::input_output_error::make();
+      }
+      layout.oi_size = val.length();
+      val.copy_out(0, val.length(), &layout.oi[0]);
+    } else if (key == SS_ATTR) {
+      if (__builtin_expect(
+          val.length() > onode_layout_t::MAX_SS_LENGTH,
+          false)) {
+        logger().error("{} onode={} oi attr too long!");
+        return crimson::ct_error::input_output_error::make();
+      }
+      layout.ss_size = val.length();
+      val.copy_out(0, val.length(), &layout.ss[0]);
+    } else {
+      //FIXME: right now, only OI_ATTR and SS_ATTR are supported
+      assert(0 == "only OI_ATTR and SS_ATTR are supported for now");
+    }
+  }
   return tm_ertr::now();
 }
 
@@ -833,13 +911,41 @@ boost::intrusive_ptr<SeastoreCollection> SeaStore::_get_collection(const coll_t&
 seastar::future<> SeaStore::write_meta(const std::string& key,
 					const std::string& value)
 {
-  return seastar::make_ready_future<>();
+  logger().debug("{}, key: {}; value: {}", __func__, key, value);
+  return seastar::do_with(key, value,
+    [this](auto& key, auto& value) {
+    return repeat_eagain([this, &key, &value] {
+      auto t = transaction_manager->create_transaction();
+      return transaction_manager->get_root(*t).safe_then(
+        [this, t=std::move(t), &key, &value](auto root) mutable {
+        transaction_manager->update_root_meta(*t, key, value);
+        return transaction_manager->submit_transaction(std::move(t));
+      });
+    });
+  }).handle_error(
+    crimson::ct_error::assert_all{"Invalid error in Seastar::write_meta"}
+  );
 }
 
 seastar::future<std::tuple<int, std::string>> SeaStore::read_meta(const std::string& key)
 {
-  return seastar::make_ready_future<std::tuple<int, std::string>>(
-    std::make_tuple(0, ""s));
+  logger().debug("{}, key: {}", __func__, key);
+  return seastar::do_with(transaction_manager->create_transaction(), key,
+    [this](auto& t, auto& key) {
+    return transaction_manager->get_root(*t).safe_then(
+      [this, &key](auto root) {
+      auto& meta = root->meta;
+      auto it = meta.find(key);
+      if (it != meta.end()) {
+        return seastar::make_ready_future<std::tuple<int, std::string>>(
+          std::make_tuple(0, it->second));
+      }
+      return seastar::make_ready_future<std::tuple<int, std::string>>(
+        std::make_tuple(-1, std::string("")));
+    });
+  }).handle_error(
+    crimson::ct_error::assert_all{"Invalid error in Seastar::write_meta"}
+  );
 }
 
 uuid_d SeaStore::get_fsid() const
