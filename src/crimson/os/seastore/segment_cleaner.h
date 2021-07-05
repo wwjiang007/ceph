@@ -7,6 +7,8 @@
 
 #include "common/ceph_time.h"
 
+#include "osd/osd_types.h"
+
 #include "crimson/common/log.h"
 #include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/journal.h"
@@ -210,10 +212,6 @@ class SegmentCleaner : public JournalSegmentProvider {
 public:
   /// Config
   struct config_t {
-    size_t num_segments = 0;
-    size_t segment_size = 0;
-    size_t block_size = 0;
-
     size_t target_journal_segments = 0;
     size_t max_journal_segments = 0;
 
@@ -229,12 +227,8 @@ public:
     /// Number of bytes of journal entries to rewrite per cycle
     size_t journal_rewrite_per_cycle = 0;
 
-    static config_t default_from_segment_manager(
-      SegmentManager &manager) {
+    static config_t get_default() {
       return config_t{
-	manager.get_num_segments(),
-	static_cast<size_t>(manager.get_segment_size()),
-	(size_t)manager.get_block_size(),
 	  2,    // target_journal_segments
 	  4,    // max_journal_segments
 	  .9,   // available_ratio_gc_max
@@ -259,17 +253,22 @@ public:
      *
      * returns all extents with dirty_from < bound
      */
-    using get_next_dirty_extents_ertr = crimson::errorator<>;
-    using get_next_dirty_extents_ret = get_next_dirty_extents_ertr::future<
+    using get_next_dirty_extents_iertr = crimson::errorator<>;
+    using get_next_dirty_extents_ret = get_next_dirty_extents_iertr::future<
       std::vector<CachedExtentRef>>;
     virtual get_next_dirty_extents_ret get_next_dirty_extents(
       journal_seq_t bound,///< [in] return extents with dirty_from < bound
       size_t max_bytes    ///< [in] return up to max_bytes of extents
     ) = 0;
 
+
     using extent_mapping_ertr = crimson::errorator<
       crimson::ct_error::input_output_error,
       crimson::ct_error::eagain>;
+    using extent_mapping_iertr = trans_iertr<
+      crimson::errorator<
+	crimson::ct_error::input_output_error>
+      >;
 
     /**
      * rewrite_extent
@@ -279,8 +278,8 @@ public:
      * handle finding the current instance if it is still alive and
      * otherwise ignore it.
      */
-    using rewrite_extent_ertr = extent_mapping_ertr;
-    using rewrite_extent_ret = rewrite_extent_ertr::future<>;
+    using rewrite_extent_iertr = extent_mapping_iertr;
+    using rewrite_extent_ret = rewrite_extent_iertr::future<>;
     virtual rewrite_extent_ret rewrite_extent(
       Transaction &t,
       CachedExtentRef extent) = 0;
@@ -294,8 +293,8 @@ public:
      * See TransactionManager::get_extent_if_live and
      * LBAManager::get_physical_extent_if_live.
      */
-    using get_extent_if_live_ertr = extent_mapping_ertr;
-    using get_extent_if_live_ret = get_extent_if_live_ertr::future<
+    using get_extent_if_live_iertr = extent_mapping_iertr;
+    using get_extent_if_live_ret = get_extent_if_live_iertr::future<
       CachedExtentRef>;
     virtual get_extent_if_live_ret get_extent_if_live(
       Transaction &t,
@@ -331,24 +330,35 @@ public:
      *
      * Submits transaction without any space throttling.
      */
-    using submit_transaction_direct_ertr = crimson::errorator<
-      crimson::ct_error::eagain,
-      crimson::ct_error::input_output_error
+    using submit_transaction_direct_iertr = trans_iertr<
+      crimson::errorator<
+        crimson::ct_error::input_output_error>
       >;
     using submit_transaction_direct_ret =
-      submit_transaction_direct_ertr::future<>;
+      submit_transaction_direct_iertr::future<>;
     virtual submit_transaction_direct_ret submit_transaction_direct(
-      TransactionRef t) = 0;
+      Transaction &t) = 0;
   };
 
 private:
+  const bool detailed;
   const config_t config;
+
+  size_t num_segments = 0;
+  size_t segment_size = 0;
+  size_t block_size = 0;
 
   SpaceTrackerIRef space_tracker;
   std::vector<segment_info_t> segments;
   size_t empty_segments;
   int64_t used_bytes = 0;
   bool init_complete = false;
+
+  struct {
+    uint64_t segments_released = 0;
+  } stats;
+  seastar::metrics::metric_group metrics;
+  void register_metrics();
 
   /// target journal_tail for next fresh segment
   journal_seq_t journal_tail_target;
@@ -365,19 +375,32 @@ private:
   std::optional<seastar::promise<>> blocked_io_wake;
 
 public:
-  SegmentCleaner(config_t config, bool detailed = false)
-    : config(config),
-      space_tracker(
-	detailed ?
-	(SpaceTrackerI*)new SpaceTrackerDetailed(
-	  config.num_segments,
-	  config.segment_size,
-	  config.block_size) :
-	(SpaceTrackerI*)new SpaceTrackerSimple(
-	  config.num_segments)),
-      segments(config.num_segments),
-      empty_segments(config.num_segments),
-      gc_process(*this) {}
+  SegmentCleaner(config_t config, bool detailed = false);
+
+  void mount(SegmentManager &sm) {
+    init_complete = false;
+    used_bytes = 0;
+    journal_tail_target = journal_seq_t{};
+    journal_tail_committed = journal_seq_t{};
+    journal_head = journal_seq_t{};
+
+    num_segments = sm.get_num_segments();
+    segment_size = static_cast<size_t>(sm.get_segment_size());
+    block_size = static_cast<size_t>(sm.get_block_size());
+
+    space_tracker.reset(
+      detailed ?
+      (SpaceTrackerI*)new SpaceTrackerDetailed(
+	num_segments,
+	segment_size,
+	block_size) :
+      (SpaceTrackerI*)new SpaceTrackerSimple(
+	num_segments));
+
+    segments.clear();
+    segments.resize(num_segments);
+    empty_segments = num_segments;
+  }
 
   get_segment_ret get_segment() final;
 
@@ -419,7 +442,7 @@ public:
   }
 
   void init_mark_segment_closed(segment_id_t segment, segment_seq_t seq) final {
-    crimson::get_logger(ceph_subsys_filestore).debug(
+    crimson::get_logger(ceph_subsys_seastore).debug(
       "SegmentCleaner::init_mark_segment_closed: segment {}, seq {}",
       segment,
       seq);
@@ -432,6 +455,7 @@ public:
   }
 
   void mark_segment_released(segment_id_t segment) {
+    stats.segments_released++;
     return mark_empty(segment);
   }
 
@@ -482,7 +506,7 @@ public:
       }
     }
     if (ret != NULL_SEG_ID) {
-      crimson::get_logger(ceph_subsys_filestore).debug(
+      crimson::get_logger(ceph_subsys_seastore).debug(
 	"SegmentCleaner::get_next_gc_target: segment {} seq {}",
 	ret,
 	segments[ret].journal_segment_seq);
@@ -503,6 +527,18 @@ public:
     start();
   }
 
+  store_statfs_t stat() const {
+    store_statfs_t st;
+    st.total = get_total_bytes();
+    st.available = get_total_bytes() - get_used_bytes();
+    st.allocated = get_used_bytes();
+    st.data_stored = get_used_bytes();
+
+    // TODO add per extent type counters for omap_allocated and
+    // internal metadata
+    return st;
+  }
+
   seastar::future<> stop() {
     return gc_process.stop();
   }
@@ -520,6 +556,7 @@ public:
   }
 
   using work_ertr = ExtentCallbackInterface::extent_mapping_ertr;
+  using work_iertr = ExtentCallbackInterface::extent_mapping_iertr;
 
 private:
 
@@ -530,8 +567,8 @@ private:
    *
    * Writes out dirty blocks dirtied earlier than limit.
    */
-  using rewrite_dirty_ertr = ExtentCallbackInterface::extent_mapping_ertr;
-  using rewrite_dirty_ret = rewrite_dirty_ertr::future<>;
+  using rewrite_dirty_iertr = work_iertr;
+  using rewrite_dirty_ret = rewrite_dirty_iertr::future<>;
   rewrite_dirty_ret rewrite_dirty(
     Transaction &t,
     journal_seq_t limit);
@@ -631,7 +668,7 @@ private:
     }
   } gc_process;
 
-  using gc_ertr = ExtentCallbackInterface::extent_mapping_ertr::extend_ertr<
+  using gc_ertr = work_ertr::extend_ertr<
     ExtentCallbackInterface::scan_extents_ertr
     >;
 
@@ -650,7 +687,7 @@ private:
   }
 
   size_t get_bytes_available_current_segment() const {
-    return config.segment_size - get_bytes_used_current_segment();
+    return segment_size - get_bytes_used_current_segment();
   }
 
   /**
@@ -668,14 +705,14 @@ private:
 
   /// Returns free space available for writes
   size_t get_available_bytes() const {
-    return (empty_segments * config.segment_size) +
+    return (empty_segments * segment_size) +
       get_bytes_available_current_segment() +
       get_bytes_scanned_current_segment();
   }
 
   /// Returns total space available
   size_t get_total_bytes() const {
-    return config.segment_size * config.num_segments;
+    return segment_size * num_segments;
   }
 
   /// Returns total space not free
@@ -692,7 +729,7 @@ private:
   size_t get_journal_segment_bytes() const {
     assert(journal_head >= journal_tail_committed);
     return (journal_head.segment_seq - journal_tail_committed.segment_seq + 1) *
-      config.segment_size;
+      segment_size;
   }
 
   /**
@@ -745,7 +782,7 @@ private:
   }
 
   void log_gc_state(const char *caller) const {
-    auto &logger = crimson::get_logger(ceph_subsys_filestore);
+    auto &logger = crimson::get_logger(ceph_subsys_seastore);
     if (logger.is_enabled(seastar::log_level::debug)) {
       logger.debug(
 	"SegmentCleaner::log_gc_state({}): "
@@ -846,7 +883,7 @@ private:
       assert(empty_segments > 0);
       --empty_segments;
     }
-    crimson::get_logger(ceph_subsys_filestore).debug(
+    crimson::get_logger(ceph_subsys_seastore).debug(
       "mark_closed: empty_segments: {}",
       empty_segments);
     segments[segment].state = Segment::segment_state_t::CLOSED;

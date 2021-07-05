@@ -9,7 +9,6 @@ set(client_srcs
   ceph-dencoder.rst)
 
 set(server_srcs
-  ceph-deploy.rst
   crushtool.rst
   ceph-run.rst
   mount.ceph.rst
@@ -42,6 +41,11 @@ list(APPEND man_srcs
   librados-config.rst
   cephadm.rst
   cephfs-mirror.rst)
+
+if(WITH_CEPHFS_SHELL)
+  list(APPEND man_srcs
+    cephfs-shell.rst)
+endif()
 
 if(HAVE_LIBFUSE)
   list(APPEND man_srcs

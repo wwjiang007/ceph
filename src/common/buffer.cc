@@ -103,8 +103,8 @@ static ceph::spinlock debug_lock;
 	   unsigned align,
 	   int mempool = mempool::mempool_buffer_anon)
     {
-      if (!align)
-	align = sizeof(size_t);
+      // posix_memalign() requires a multiple of sizeof(void *)
+      align = std::max<unsigned>(align, sizeof(void *));
       size_t rawlen = round_up_to(sizeof(buffer::raw_combined),
 				  alignof(buffer::raw_combined));
       size_t datalen = round_up_to(len, alignof(buffer::raw_combined));
@@ -165,8 +165,8 @@ static ceph::spinlock debug_lock;
     MEMPOOL_CLASS_HELPERS();
 
     raw_posix_aligned(unsigned l, unsigned _align) : raw(l) {
-      align = _align;
-      ceph_assert((align >= sizeof(void *)) && (align & (align - 1)) == 0);
+      // posix_memalign() requires a multiple of sizeof(void *)
+      align = std::max<unsigned>(_align, sizeof(void *));
 #ifdef DARWIN
       data = (char *) valloc(len);
 #else
@@ -1519,16 +1519,18 @@ static ceph::spinlock debug_lock;
    */
   char *buffer::list::c_str()
   {
-    if (_buffers.empty())
-      return 0;                         // no buffers
-
-    auto iter = std::cbegin(_buffers);
-    ++iter;
-
-    if (iter != std::cend(_buffers)) {
+    switch (get_num_buffers()) {
+    case 0:
+      // no buffers
+      return nullptr;
+    case 1:
+      // good, we're already contiguous.
+      break;
+    default:
       rebuild();
+      break;
     }
-    return _buffers.front().c_str();  // good, we're already contiguous.
+    return _buffers.front().c_str();
   }
 
   string buffer::list::to_str() const {

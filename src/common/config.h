@@ -16,6 +16,7 @@
 #define CEPH_CONFIG_H
 
 #include <map>
+#include <variant>
 #include <boost/container/small_vector.hpp>
 #include "common/ConfUtils.h"
 #include "common/code_environment.h"
@@ -69,14 +70,14 @@ extern const char *ceph_conf_level_name(int level);
  */
 struct md_config_t {
 public:
-  typedef boost::variant<int64_t ConfigValues::*,
-                         uint64_t ConfigValues::*,
-                         std::string ConfigValues::*,
-                         double ConfigValues::*,
-                         bool ConfigValues::*,
-                         entity_addr_t ConfigValues::*,
-			 entity_addrvec_t ConfigValues::*,
-                         uuid_d ConfigValues::*> member_ptr_t;
+  typedef std::variant<int64_t ConfigValues::*,
+                       uint64_t ConfigValues::*,
+                       std::string ConfigValues::*,
+                       double ConfigValues::*,
+                       bool ConfigValues::*,
+                       entity_addr_t ConfigValues::*,
+                       entity_addrvec_t ConfigValues::*,
+                       uuid_d ConfigValues::*> member_ptr_t;
 
   // For use when intercepting configuration updates
   typedef std::function<bool(
@@ -201,7 +202,7 @@ public:
 		Callback&& cb, Args&&... args) const ->
     std::result_of_t<Callback(const T&, Args...)> {
     return std::forward<Callback>(cb)(
-      boost::get<T>(this->get_val_generic(values, key)),
+      std::get<T>(this->get_val_generic(values, key)),
       std::forward<Args>(args)...);
   }
 
@@ -319,10 +320,15 @@ public:  // for global_init
 					    const char *conf_files,
 					    std::ostream *warnings,
 					    int flags) const;
+
+  const std::string& get_conf_path() const {
+    return conf_path;
+  }
 private:
   static std::string get_cluster_name(const char* conffile_path);
   // The configuration file we read, or NULL if we haven't read one.
   ConfFile cf;
+  std::string conf_path;
 public:
   std::string parse_error;
 private:
@@ -352,10 +358,10 @@ public:
 template<typename T>
 const T md_config_t::get_val(const ConfigValues& values,
 			     const std::string_view key) const {
-  return boost::get<T>(this->get_val_generic(values, key));
+  return std::get<T>(this->get_val_generic(values, key));
 }
 
-inline std::ostream& operator<<(std::ostream& o, const boost::blank& ) {
+inline std::ostream& operator<<(std::ostream& o, const std::monostate&) {
       return o << "INVALID_CONFIG_VALUE";
 }
 

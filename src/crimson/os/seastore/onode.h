@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 // vim: ts=8 sw=2 smarttab
 
 #pragma once
@@ -32,6 +32,7 @@ struct onode_layout_t {
   ceph_le32 oi_size{0};
   ceph_le32 ss_size{0};
   omap_root_le_t omap_root;
+  omap_root_le_t xattr_root;
 
   object_data_le_t object_data;
 

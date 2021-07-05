@@ -38,6 +38,7 @@
 #include <map>
 #include <vector>
 #include <thread>
+#include <regex>
 
 #ifndef ALLPERMS
 #define ALLPERMS (S_ISUID|S_ISGID|S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO)
@@ -2287,6 +2288,32 @@ TEST(LibCephFS, OperationsOnDotDot) {
   ceph_shutdown(cmount);
 }
 
+TEST(LibCephFS, Caps_vxattr) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  char test_caps_vxattr_file[256];
+  char gxattrv[128];
+  int xbuflen = sizeof(gxattrv);
+  pid_t mypid = getpid();
+
+  sprintf(test_caps_vxattr_file, "test_caps_vxattr_%d", mypid);
+  int fd = ceph_open(cmount, test_caps_vxattr_file, O_CREAT, 0666);
+  ASSERT_GT(fd, 0);
+  ceph_close(cmount, fd);
+
+  int alen = ceph_getxattr(cmount, test_caps_vxattr_file, "ceph.caps", (void *)gxattrv, xbuflen);
+  ASSERT_GT(alen, 0);
+  gxattrv[alen] = '\0';
+
+  char caps_regex[] = "pA[sx]*L[sx]*X[sx]*F[sxcrwbal]*/0x[0-9a-fA-f]+";
+  ASSERT_TRUE(regex_match(gxattrv, regex(caps_regex)) == 1);
+  ceph_shutdown(cmount);
+}
+
 TEST(LibCephFS, SnapXattrs) {
   struct ceph_mount_info *cmount;
   ASSERT_EQ(ceph_create(&cmount, NULL), 0);
@@ -3491,5 +3518,54 @@ TEST(LibCephFS, UtimensatATFDCWD) {
 
   ASSERT_EQ(0, ceph_unlink(cmount, file_path));
   ASSERT_EQ(0, ceph_rmdir(cmount, dir_path));
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, LookupMdsPrivateInos) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  Inode *inode;
+  for (int ino = 0; ino < MDS_INO_SYSTEM_BASE; ino++) {
+    if (MDS_IS_PRIVATE_INO(ino)) {
+      ASSERT_EQ(-ESTALE, ceph_ll_lookup_inode(cmount, ino, &inode));
+    } else if (ino == CEPH_INO_ROOT || ino == CEPH_INO_GLOBAL_SNAPREALM) {
+      ASSERT_EQ(0, ceph_ll_lookup_inode(cmount, ino, &inode));
+    } else if (ino == CEPH_INO_LOST_AND_FOUND) {
+      // the ino 3 will only exists after the recovery tool ran, so
+      // it may return -ESTALE with a fresh fs cluster
+      int r = ceph_ll_lookup_inode(cmount, ino, &inode);
+      ASSERT_TRUE(r == -ESTALE || r == 0);
+    } else {
+      // currently the ino 0 and 4~99 is not useded yet.
+      ASSERT_EQ(-ESTALE, ceph_ll_lookup_inode(cmount, ino, &inode));
+    }
+  }
+
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, SetMountTimeoutPostMount) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  ASSERT_EQ(-EINVAL, ceph_set_mount_timeout(cmount, 5));
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, SetMountTimeout) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(0, ceph_set_mount_timeout(cmount, 5));
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
   ceph_shutdown(cmount);
 }

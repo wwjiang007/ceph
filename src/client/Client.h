@@ -653,7 +653,9 @@ public:
   int ll_osdaddr(int osd, uint32_t *addr);
   int ll_osdaddr(int osd, char* buf, size_t size);
 
-  void ll_register_callbacks(struct ceph_client_callback_args *args);
+  void _ll_register_callbacks(struct ceph_client_callback_args *args);
+  void ll_register_callbacks(struct ceph_client_callback_args *args); // deprecated
+  int ll_register_callbacks2(struct ceph_client_callback_args *args);
   int test_dentry_handling(bool can_invalidate);
 
   const char** get_tracked_conf_keys() const override;
@@ -1409,6 +1411,8 @@ private:
 
   bool _vxattrcb_snap_btime_exists(Inode *in);
   size_t _vxattrcb_snap_btime(Inode *in, char *val, size_t size);
+
+  size_t _vxattrcb_caps(Inode *in, char *val, size_t size);
 
   bool _vxattrcb_mirror_info_exists(Inode *in);
   size_t _vxattrcb_mirror_info(Inode *in, char *val, size_t size);

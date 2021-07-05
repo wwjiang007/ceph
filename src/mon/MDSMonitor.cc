@@ -86,19 +86,19 @@ static const string MDS_HEALTH_PREFIX("mds_health");
  */
 namespace TOPNSPC::common {
 template<> bool cmd_getval(const cmdmap_t& cmdmap,
-			   const std::string& k, mds_gid_t &val)
+			   std::string_view k, mds_gid_t &val)
 {
   return cmd_getval(cmdmap, k, (int64_t&)val);
 }
 
 template<> bool cmd_getval(const cmdmap_t& cmdmap,
-			   const std::string& k, mds_rank_t &val)
+			   std::string_view k, mds_rank_t &val)
 {
   return cmd_getval(cmdmap, k, (int64_t&)val);
 }
 
 template<> bool cmd_getval(const cmdmap_t& cmdmap,
-			   const std::string& k, MDSMap::DaemonState &val)
+			   std::string_view k, MDSMap::DaemonState &val)
 {
   return cmd_getval(cmdmap, k, (int64_t&)val);
 }
@@ -951,8 +951,7 @@ bool MDSMonitor::preprocess_command(MonOpRequestRef op)
 
   string prefix;
   cmd_getval(cmdmap, "prefix", prefix);
-  string format;
-  cmd_getval(cmdmap, "format", format, string("plain"));
+  string format = cmd_getval_or<string>(cmdmap, "format", "plain");
   std::unique_ptr<Formatter> f(Formatter::create(format));
 
   MonSession *session = op->get_session();
@@ -1756,15 +1755,6 @@ void MDSMonitor::check_sub(Subscription *sub)
                   << "'" << dendl;
           return;
         }
-        if (fsmap.filesystems.count(fscid) == 0) {
-          // Client asked for a non-existent namespace, send them nothing
-          // TODO: something more graceful for when a client has a filesystem
-          // mounted, and the fileysstem is deleted.  Add a "shut down you fool"
-          // flag to MMDSMap?
-          dout(1) << "Client subscribed to non-existent namespace '" <<
-                  fscid << "'" << dendl;
-          return;
-        }
       } else {
         // Unqualified request for "mdsmap": give it the one marked
         // for use by legacy clients.
@@ -1776,8 +1766,17 @@ void MDSMonitor::check_sub(Subscription *sub)
           return;
         }
       }
+      if (!fsmap.filesystem_exists(fscid)) {
+        // Client asked for a non-existent namespace, send them nothing
+        // TODO: something more graceful for when a client has a filesystem
+        // mounted, and the fileysstem is deleted.  Add a "shut down you fool"
+        // flag to MMDSMap?
+        dout(1) << "Client subscribed to non-existent namespace '" <<
+                fscid << "'" << dendl;
+        return;
+      }
     }
-    dout(10) << __func__ << ": is_mds=" << is_mds << ", fscid= " << fscid << dendl;
+    dout(10) << __func__ << ": is_mds=" << is_mds << ", fscid=" << fscid << dendl;
 
     // Work out the effective latest epoch
     const MDSMap *mds_map = nullptr;
@@ -1809,8 +1808,7 @@ void MDSMonitor::check_sub(Subscription *sub)
     if (sub->next > mds_map->epoch) {
       return;
     }
-    auto msg = make_message<MMDSMap>(mon.monmap->fsid, *mds_map,
-			             mds_map->fs_name);
+    auto msg = make_message<MMDSMap>(mon.monmap->fsid, *mds_map);
 
     sub->session->con->send_message(msg.detach());
     if (sub->onetime) {

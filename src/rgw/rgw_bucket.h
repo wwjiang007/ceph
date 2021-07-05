@@ -343,16 +343,14 @@ public:
                          optional_yield y,
                          std::string *err_msg = NULL);
 
-  int check_index(RGWBucketAdminOpState& op_state,
+  int check_index(const DoutPrefixProvider *dpp,
+          RGWBucketAdminOpState& op_state,
           map<RGWObjCategory, RGWStorageStats>& existing_stats,
           map<RGWObjCategory, RGWStorageStats>& calculated_stats,
           std::string *err_msg = NULL);
 
-  int link(RGWBucketAdminOpState& op_state, optional_yield y, const DoutPrefixProvider *dpp,
-           std::string *err_msg = NULL);
   int chown(RGWBucketAdminOpState& op_state, const string& marker,
             optional_yield y, const DoutPrefixProvider *dpp, std::string *err_msg = NULL);
-  int unlink(RGWBucketAdminOpState& op_state, optional_yield y, const DoutPrefixProvider *dpp, std::string *err_msg = NULL);
   int set_quota(RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, std::string *err_msg = NULL);
 
   int remove_object(const DoutPrefixProvider *dpp, RGWBucketAdminOpState& op_state, std::string *err_msg = NULL);
@@ -694,10 +692,6 @@ public:
             const rgw_user& user_id, const std::string& display_name,
             const std::string& marker, optional_yield y, const DoutPrefixProvider *dpp);
 
-  int set_acl(ACLOwner& owner, rgw_bucket& bucket,
-              RGWBucketInfo& bucket_info, bufferlist& bl, optional_yield y,
-              const DoutPrefixProvider *dpp);
-
   int read_buckets_stats(map<string, RGWBucketEnt>& m,
                          optional_yield y,
                          const DoutPrefixProvider *dpp);
@@ -708,7 +702,8 @@ public:
                         const DoutPrefixProvider *dpp);
 
   /* quota related */
-  int sync_user_stats(const rgw_user& user_id, const RGWBucketInfo& bucket_info,
+  int sync_user_stats(const DoutPrefixProvider *dpp, 
+                      const rgw_user& user_id, const RGWBucketInfo& bucket_info,
 		      optional_yield y,
                       RGWBucketEnt* pent = nullptr);
 
@@ -766,7 +761,7 @@ private:
 
 };
 
-bool rgw_find_bucket_by_id(CephContext *cct, rgw::sal::Store* store, const string& marker,
+bool rgw_find_bucket_by_id(const DoutPrefixProvider *dpp, CephContext *cct, rgw::sal::Store* store, const string& marker,
                            const string& bucket_id, rgw_bucket* bucket_out);
 
 #endif

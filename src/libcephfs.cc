@@ -27,6 +27,7 @@
 #include "common/version.h"
 #include "mon/MonClient.h"
 #include "include/str_list.h"
+#include "include/stringify.h"
 #include "messages/MMonMap.h"
 #include "msg/Messenger.h"
 #include "include/ceph_assert.h"
@@ -502,6 +503,15 @@ extern "C" int ceph_conf_get(struct ceph_mount_info *cmount, const char *option,
     return -EINVAL;
   }
   return cmount->conf_get(option, buf, len);
+}
+
+extern "C" int ceph_set_mount_timeout(struct ceph_mount_info *cmount, uint32_t timeout) {
+  if (cmount->is_mounted()) {
+    return -EINVAL;
+  }
+
+  auto timeout_str = stringify(timeout);
+  return ceph_conf_set(cmount, "client_mount_timeout", timeout_str.c_str());
 }
 
 extern "C" int ceph_mds_command(struct ceph_mount_info *cmount,
@@ -2154,11 +2164,17 @@ extern "C" void ceph_finish_reclaim(class ceph_mount_info *cmount)
   cmount->get_client()->finish_reclaim();
 }
 
+// This is deprecated, use ceph_ll_register_callbacks2 instead.
 extern "C" void ceph_ll_register_callbacks(class ceph_mount_info *cmount,
 					   struct ceph_client_callback_args *args)
 {
   cmount->get_client()->ll_register_callbacks(args);
+}
 
+extern "C" int ceph_ll_register_callbacks2(class ceph_mount_info *cmount,
+					    struct ceph_client_callback_args *args)
+{
+  return cmount->get_client()->ll_register_callbacks2(args);
 }
 
 

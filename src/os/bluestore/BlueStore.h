@@ -1590,8 +1590,8 @@ public:
     // negative of the previous ondisk offset.  We need to maintain a vector of
     // offsets because *within the same transaction* an object may be truncated
     // and then written again, or an object may be overwritten multiple times to
-    // different zones.  See update_cleaning_metadata function for how this map
-    // is used.
+    // different zones.  See _zoned_update_cleaning_metadata function for how
+    // this map is used.
     std::map<OnodeRef, std::vector<int64_t>> zoned_onode_to_offset_map;
 #endif
     
@@ -2400,7 +2400,7 @@ private:
   uint64_t _zoned_piggyback_device_parameters_onto(uint64_t min_alloc_size);
   int _zoned_check_config_settings();
   void _zoned_update_cleaning_metadata(TransContext *txc);
-  std::string _zoned_get_prefix(uint64_t offset);
+  std::string _zoned_key(uint64_t offset, const ghobject_t *oid);
 #endif
 
 public:
@@ -2836,7 +2836,7 @@ public:
 	      ceph::buffer::ptr& value) override;
 
   int getattrs(CollectionHandle &c, const ghobject_t& oid,
-	       std::map<std::string,ceph::buffer::ptr>& aset) override;
+	       std::map<std::string,ceph::buffer::ptr, std::less<>>& aset) override;
 
   int list_collections(std::vector<coll_t>& ls) override;
 
@@ -2996,6 +2996,7 @@ public:
   void inject_legacy_omap();
   // resets per_pool_omap | pgmeta_omap for onode
   void inject_legacy_omap(coll_t cid, ghobject_t oid);
+  void inject_stray_omap(uint64_t head, const std::string& name);
 
   void compact() override {
     ceph_assert(db);
@@ -3485,6 +3486,8 @@ static inline void intrusive_ptr_release(BlueStore::OpSequencer *o) {
 
 class BlueStoreRepairer
 {
+  ceph::mutex lock = ceph::make_mutex("BlueStore::BlueStoreRepairer::lock");
+
 public:
   // to simplify future potential migration to mempools
   using fsck_interval = interval_set<uint64_t>;
@@ -3626,15 +3629,16 @@ public:
   bool fix_false_free(KeyValueDB *db,
 		      FreelistManager* fm,
 		      uint64_t offset, uint64_t len);
-  KeyValueDB::Transaction fix_spanning_blobs(KeyValueDB* db);
-
-  void init(uint64_t total_space, uint64_t lres_tracking_unit_size);
+  bool fix_spanning_blobs(
+    KeyValueDB* db,
+    std::function<void(KeyValueDB::Transaction)> f);
 
   bool preprocess_misreference(KeyValueDB *db);
 
   unsigned apply(KeyValueDB* db);
 
   void note_misreference(uint64_t offs, uint64_t len, bool inc_error) {
+    std::lock_guard l(lock);
     misreferenced_extents.union_insert(offs, len);
     if (inc_error) {
       ++to_repair_cnt;
@@ -3645,13 +3649,32 @@ public:
     ++to_repair_cnt;
   }
 
-  StoreSpaceTracker& get_space_usage_tracker() {
-    return space_usage_tracker;
+  void init_space_usage_tracker(
+    uint64_t total_space, uint64_t lres_tracking_unit_size)
+  {
+    //NB: not for use in multithreading mode!!!
+    space_usage_tracker.init(total_space, lres_tracking_unit_size);
   }
+  void set_space_used(uint64_t offset, uint64_t len,
+    const coll_t& cid, const ghobject_t& oid) {
+    std::lock_guard l(lock);
+    space_usage_tracker.set_used(offset, len, cid, oid);
+  }
+  inline bool is_used(const coll_t& cid) const {
+    //NB: not for use in multithreading mode!!!
+    return space_usage_tracker.is_used(cid);
+  }
+  inline bool is_used(const ghobject_t& oid) const {
+    //NB: not for use in multithreading mode!!!
+    return space_usage_tracker.is_used(oid);
+  }
+
   const fsck_interval& get_misreferences() const {
+    //NB: not for use in multithreading mode!!!
     return misreferenced_extents;
   }
   KeyValueDB::Transaction get_fix_misreferences_txn() {
+    //NB: not for use in multithreading mode!!!
     return fix_misreferences_txn;
   }
 

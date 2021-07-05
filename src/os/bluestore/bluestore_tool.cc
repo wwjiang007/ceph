@@ -6,13 +6,7 @@
 
 #include <stdio.h>
 #include <string.h>
-#if __has_include(<filesystem>)
 #include <filesystem>
-namespace fs = std::filesystem;
-#elif __has_include(<experimental/filesystem>)
-#include <experimental/filesystem>
-namespace fs = std::experimental::filesystem;
-#endif
 #include <iostream>
 #include <fstream>
 #include <time.h>
@@ -29,6 +23,7 @@ namespace fs = std::experimental::filesystem;
 #include "common/admin_socket.h"
 #include "kv/RocksDBStore.h"
 
+namespace fs = std::filesystem;
 namespace po = boost::program_options;
 
 void usage(po::options_description &desc)
@@ -249,8 +244,8 @@ static void bluefs_import(
 
   BlueFS::FileWriter *h;
   fs::path file_path(dest_file);
-  const string dir = file_path.parent_path();
-  const string file_name = file_path.filename();
+  const string dir = file_path.parent_path().native();
+  const string file_name = file_path.filename().native();
   bs->open_for_write(dir, file_name, &h, false);
   uint64_t max_block = 4096;
   char buf[max_block];
@@ -302,7 +297,7 @@ int main(int argc, char **argv)
     ("deep", po::value<bool>(&fsck_deep), "deep fsck (read all data)")
     ("key,k", po::value<string>(&key), "label metadata key name")
     ("value,v", po::value<string>(&value), "label metadata value")
-    ("allocator", po::value<vector<string>>(&allocs_name), "allocator to inspect: 'block'/'bluefs-wal'/'bluefs-db'/'bluefs-slow'")
+    ("allocator", po::value<vector<string>>(&allocs_name), "allocator to inspect: 'block'/'bluefs-wal'/'bluefs-db'")
     ("sharding", po::value<string>(&new_sharding), "new sharding to apply")
     ("resharding-ctrl", po::value<string>(&resharding_ctrl), "gives control over resharding procedure details")
     ;
@@ -326,6 +321,7 @@ int main(int argc, char **argv)
         "bluefs-log-dump, "
         "free-dump, "
         "free-score, "
+        "free-fragmentation, "
         "bluefs-stats, "
         "reshard, "
         "show-sharding")
@@ -453,7 +449,7 @@ int main(int argc, char **argv)
       exit(EXIT_FAILURE);
     }
   }
-  if (action == "free-score" || action == "free-dump") {
+  if (action == "free-score" || action == "free-dump" || action == "free-fragmentation") {
     if (path.empty()) {
       cerr << "must specify bluestore path" << std::endl;
       exit(EXIT_FAILURE);
@@ -462,14 +458,13 @@ int main(int argc, char **argv)
       if (!name.empty() &&
           name != "block" &&
           name != "bluefs-db" &&
-          name != "bluefs-wal" &&
-          name != "bluefs-slow") {
+          name != "bluefs-wal") {
         cerr << "unknown allocator '" << name << "'" << std::endl;
         exit(EXIT_FAILURE);
       }
     }
     if (allocs_name.empty())
-      allocs_name = vector<string>{"block", "bluefs-db", "bluefs-wal", "bluefs-slow"};
+      allocs_name = vector<string>{"block", "bluefs-db", "bluefs-wal"};
   }
   if (action == "reshard") {
     if (path.empty()) {
@@ -763,7 +758,6 @@ int main(int argc, char **argv)
 
     bool has_wal = false;
     bool has_db = false;
-    char target_path[PATH_MAX] = "";
 
     parse_devices(cct.get(), devs, &cur_devs_map, &has_db, &has_wal);
 
@@ -779,39 +773,54 @@ int main(int argc, char **argv)
       cerr << "can't allocate new WAL device, already exists"
 	    << std::endl;
       exit(EXIT_FAILURE);
-    } else if(!dev_target.empty() &&
-	      realpath(dev_target.c_str(), target_path) == nullptr) {
-      cerr << "failed to retrieve absolute path for " << dev_target
-           << ": " << cpp_strerror(errno)
-           << std::endl;
-      exit(EXIT_FAILURE);
     }
 
-    // Create either DB or WAL volume
-    int r = EXIT_FAILURE;
-    if (need_db && cct->_conf->bluestore_block_db_size == 0) {
-      cerr << "DB size isn't specified, "
-              "please set Ceph bluestore-block-db-size config parameter "
-           << std::endl;
-    } else if (!need_db && cct->_conf->bluestore_block_wal_size == 0) {
-      cerr << "WAL size isn't specified, "
-              "please set Ceph bluestore-block-wal-size config parameter "
-           << std::endl;
-    } else {
-      BlueStore bluestore(cct.get(), path);
-      r = bluestore.add_new_bluefs_device(
-        need_db ? BlueFS::BDEV_NEWDB : BlueFS::BDEV_NEWWAL,
-        target_path);
-      if (r == 0) {
-        cout << (need_db ? "DB" : "WAL") << " device added " << target_path
-             << std::endl;
-      } else {
-        cerr << "failed to add " << (need_db ? "DB" : "WAL") << " device:"
-             << cpp_strerror(r)
-             << std::endl;
+    auto [target_path, has_size_spec] =
+      [&dev_target]() -> std::pair<string, bool> {
+      if (dev_target.empty()) {
+	return {"", false};
       }
-      return r;
+      std::error_code ec;
+      fs::path target_path = fs::weakly_canonical(fs::path{dev_target}, ec);
+      if (ec) {
+	cerr << "failed to retrieve absolute path for " << dev_target
+	     << ": " << ec.message()
+	     << std::endl;
+	exit(EXIT_FAILURE);
+      }
+      return {target_path.native(),
+              (fs::exists(target_path) &&
+	       fs::is_regular_file(target_path) &&
+	       fs::file_size(target_path) > 0)};
+    }();
+    // Attach either DB or WAL volume, create if needed
+    // check if we need additional size specification
+    if (!has_size_spec) {
+      if (need_db && cct->_conf->bluestore_block_db_size == 0) {
+	cerr << "Might need DB size specification, "
+		"please set Ceph bluestore-block-db-size config parameter "
+	     << std::endl;
+	return EXIT_FAILURE;
+      } else if (!need_db && cct->_conf->bluestore_block_wal_size == 0) {
+	cerr << "Might need WAL size specification, "
+		"please set Ceph bluestore-block-wal-size config parameter "
+	     << std::endl;
+	return EXIT_FAILURE;
+      }
     }
+    BlueStore bluestore(cct.get(), path);
+    int r = bluestore.add_new_bluefs_device(
+      need_db ? BlueFS::BDEV_NEWDB : BlueFS::BDEV_NEWWAL,
+      target_path);
+    if (r == 0) {
+      cout << (need_db ? "DB" : "WAL") << " device added " << target_path
+	   << std::endl;
+    } else {
+      cerr << "failed to add " << (need_db ? "DB" : "WAL") << " device:"
+	   << cpp_strerror(r)
+	   << std::endl;
+    }
+    return r;
   } else if (action == "bluefs-bdev-migrate") {
     map<string, int> cur_devs_map;
     set<int> src_dev_ids;
@@ -922,10 +931,11 @@ int main(int argc, char **argv)
       }
       return r;
     }
-  } else  if (action == "free-dump" || action == "free-score") {
+  } else  if (action == "free-dump" || action == "free-score" || action == "fragmentation") {
     AdminSocket *admin_socket = g_ceph_context->get_admin_socket();
     ceph_assert(admin_socket);
-    std::string action_name = action == "free-dump" ? "dump" : "score";
+    std::string action_name = action == "free-dump" ? "dump" :
+                              action == "free-score" ? "score" : "fragmentation";
     validate_path(cct.get(), path, false);
     BlueStore bluestore(cct.get(), path);
     int r = bluestore.cold_open();
@@ -942,10 +952,10 @@ int main(int argc, char **argv)
 	in, err, &out);
       if (r != 0) {
         cerr << "failure querying '" << alloc_name << "'" << std::endl;
-        exit(EXIT_FAILURE);
+      } else {
+        cout << alloc_name << ":" << std::endl;
+        cout << std::string(out.c_str(),out.length()) << std::endl;
       }
-      cout << alloc_name << ":" << std::endl;
-      cout << std::string(out.c_str(),out.length()) << std::endl;
     }
 
     bluestore.cold_close();

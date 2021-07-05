@@ -52,6 +52,7 @@ if(MINGW)
   set(CMAKE_CXX_LINK_EXECUTABLE
     "<CMAKE_CXX_COMPILER> <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> ${CMAKE_GNULD_IMAGE_VERSION} <LINK_LIBRARIES>")
 
+  link_directories(${MINGW_LINK_DIRECTORIES})
 endif()
 
 option(WITH_CCACHE "Build with ccache.")
@@ -338,7 +339,7 @@ jemalloc, and libc is supported. if not specified, will try to find tcmalloc, \
 and then jemalloc. If neither of then is found. use the one in libc.")
 if(ALLOCATOR)
   if(${ALLOCATOR} MATCHES "tcmalloc(_minimal)?")
-    find_package(gperftools REQUIRED)
+    find_package(gperftools 2.6.2 REQUIRED)
     set(HAVE_LIBTCMALLOC ON)
   elseif(${ALLOCATOR} STREQUAL "jemalloc")
     find_package(JeMalloc REQUIRED)
@@ -347,7 +348,7 @@ if(ALLOCATOR)
     message(FATAL_ERROR "Unsupported allocator selected: ${ALLOCATOR}")
   endif()
 else(ALLOCATOR)
-  find_package(gperftools)
+  find_package(gperftools 2.6.2)
   set(HAVE_LIBTCMALLOC ${gperftools_FOUND})
   if(NOT gperftools_FOUND)
     find_package(JeMalloc)
@@ -370,10 +371,6 @@ if(WIN32 OR (HAVE_LIBTCMALLOC AND WITH_STATIC_LIBSTDCXX))
   set(EXE_LINKER_USE_PIE FALSE)
 else()
   set(EXE_LINKER_USE_PIE ${ENABLE_SHARED})
-endif()
-
-if (HAVE_LIBTCMALLOC AND TCMALLOC_VERSION_STRING VERSION_LESS 2.6.2)
-  set(LIBTCMALLOC_MISSING_ALIGNED_ALLOC ON)
 endif()
 
 find_package(CURL REQUIRED)
@@ -408,8 +405,6 @@ endif()
 
 #option for RGW
 option(WITH_RADOSGW "Rados Gateway is enabled" ON)
-option(WITH_RADOSGW_FCGI_FRONTEND "Rados Gateway's FCGI frontend is enabled" OFF)
-option(WITH_RADOSGW_BEAST_FRONTEND "Rados Gateway's Beast frontend is enabled" ON)
 option(WITH_RADOSGW_BEAST_OPENSSL "Rados Gateway's Beast frontend uses OpenSSL" ON)
 option(WITH_RADOSGW_AMQP_ENDPOINT "Rados Gateway's pubsub support for AMQP push endpoint" ON)
 option(WITH_RADOSGW_KAFKA_ENDPOINT "Rados Gateway's pubsub support for Kafka push endpoint" ON)
@@ -417,9 +412,6 @@ option(WITH_RADOSGW_LUA_PACKAGES "Rados Gateway's support for dynamically adding
 
 if(WITH_RADOSGW)
   find_package(EXPAT REQUIRED)
-  if(WITH_RADOSGW_FCGI_FRONTEND)
-    find_package(fcgi REQUIRED)
-  endif()
   find_package(OATH REQUIRED)
 
 # https://curl.haxx.se/docs/install.html mentions the

@@ -11,6 +11,7 @@
 #include "include/buffer.h"
 #include "include/cmp.h"
 #include "include/uuid.h"
+#include "include/interval_set.h"
 
 namespace crimson::os::seastore {
 
@@ -337,6 +338,7 @@ enum class extent_types_t : uint8_t {
   OBJECT_DATA_BLOCK = 8,
   RETIRED_PLACEHOLDER = 9,
 
+  RBM_ALLOC_INFO = 0xE0,
   // Test Block Types
   TEST_BLOCK = 0xF0,
   TEST_BLOCK_PHYSICAL = 0xF1,
@@ -655,18 +657,58 @@ public:
  * TODO: generalize this to permit more than one lba_manager implementation
  */
 struct __attribute__((packed)) root_t {
+  using meta_t = std::map<std::string, std::string>;
 
   static constexpr int MAX_META_LENGTH = 1024;
 
   lba_root_t lba_root;
   laddr_le_t onode_root;
   coll_root_le_t collection_root;
+
   char meta[MAX_META_LENGTH];
-  bool have_meta = false;
+
+  root_t() {
+    set_meta(meta_t{});
+  }
 
   void adjust_addrs_from_base(paddr_t base) {
     lba_root.adjust_addrs_from_base(base);
   }
+
+  meta_t get_meta() {
+    bufferlist bl;
+    bl.append(ceph::buffer::create_static(MAX_META_LENGTH, meta));
+    meta_t ret;
+    auto iter = bl.cbegin();
+    decode(ret, iter);
+    return ret;
+  }
+
+  void set_meta(const meta_t &m) {
+    ceph::bufferlist bl;
+    encode(m, bl);
+    ceph_assert(bl.length() < MAX_META_LENGTH);
+    bl.rebuild();
+    auto &bptr = bl.front();
+    ::memset(meta, 0, MAX_META_LENGTH);
+    ::memcpy(meta, bptr.c_str(), bl.length());
+  }
+};
+
+using blk_id_t = uint64_t;
+constexpr blk_id_t NULL_BLK_ID =
+  std::numeric_limits<blk_id_t>::max();
+
+// use absolute address
+using blk_paddr_t = uint64_t;
+struct rbm_alloc_delta_t {
+  enum class op_types_t : uint8_t {
+    SET = 1,
+    CLEAR = 2
+  };
+  extent_types_t type;
+  interval_set<blk_id_t> alloc_blk_ids;
+  op_types_t op;
 };
 
 }

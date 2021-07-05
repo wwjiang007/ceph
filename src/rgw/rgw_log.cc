@@ -86,7 +86,7 @@ string render_log_object_name(const string& format,
 }
 
 /* usage logger */
-class UsageLogger {
+class UsageLogger : public DoutPrefixProvider {
   CephContext *cct;
   rgw::sal::Store* store;
   map<rgw_user_bucket, RGWUsageBatch> usage_map;
@@ -165,8 +165,12 @@ public:
     num_entries = 0;
     lock.unlock();
 
-    store->log_usage(old_map);
+    store->log_usage(this, old_map);
   }
+
+  CephContext *get_cct() const override { return cct; }
+  unsigned get_subsys() const override { return dout_subsys; }
+  std::ostream& gen_prefix(std::ostream& out) const override { return out << "rgw UsageLogger: "; }
 };
 
 static UsageLogger *usage_logger = NULL;
@@ -225,7 +229,7 @@ static void log_usage(struct req_state *s, const string& op_name)
   if (!s->is_err())
     data.successful_ops = 1;
 
-  ldout(s->cct, 30) << "log_usage: bucket_name=" << bucket_name
+  ldpp_dout(s, 30) << "log_usage: bucket_name=" << bucket_name
 	<< " tenant=" << s->bucket_tenant
 	<< ", bytes_sent=" << bytes_sent << ", bytes_received="
 	<< bytes_received << ", success=" << data.successful_ops << dendl;
@@ -275,9 +279,28 @@ void rgw_format_ops_log_entry(struct rgw_log_entry& entry, Formatter *formatter)
     formatter->close_section();
   }
   formatter->dump_string("trans_id", entry.trans_id);
+  switch(entry.identity_type) {
+    case TYPE_RGW:
+      formatter->dump_string("authentication_type","Local");
+      break;
+    case TYPE_LDAP:
+      formatter->dump_string("authentication_type","LDAP");
+      break;
+    case TYPE_KEYSTONE:
+      formatter->dump_string("authentication_type","Keystone");
+      break;
+    case TYPE_WEB:
+      formatter->dump_string("authentication_type","OIDC Provider");
+      break;
+    case TYPE_ROLE:
+      formatter->dump_string("authentication_type","STS");
+      break;
+    default:
+      break;
+  }
   if (entry.token_claims.size() > 0) {
     if (entry.token_claims[0] == "sts") {
-      formatter->open_object_section("sts_token_claims");
+      formatter->open_object_section("sts_info");
       for (const auto& iter: entry.token_claims) {
         auto pos = iter.find(":");
         if (pos != string::npos) {
@@ -341,12 +364,12 @@ int rgw_log_op(rgw::sal::Store* store, RGWREST* const rest, struct req_state *s,
     return 0;
 
   if (s->bucket_name.empty()) {
-    ldout(s->cct, 5) << "nothing to log for operation" << dendl;
+    ldpp_dout(s, 5) << "nothing to log for operation" << dendl;
     return -EINVAL;
   }
   if (s->err.ret == -ERR_NO_SUCH_BUCKET || rgw::sal::Bucket::empty(s->bucket.get())) {
     if (!s->cct->_conf->rgw_log_nonexistent_bucket) {
-      ldout(s->cct, 5) << "bucket " << s->bucket_name << " doesn't exist, not logging" << dendl;
+      ldpp_dout(s, 5) << "bucket " << s->bucket_name << " doesn't exist, not logging" << dendl;
       return 0;
     }
     bucket_id = "";
@@ -356,7 +379,7 @@ int rgw_log_op(rgw::sal::Store* store, RGWREST* const rest, struct req_state *s,
   entry.bucket = rgw_make_bucket_entry_name(s->bucket_tenant, s->bucket_name);
 
   if (check_utf8(entry.bucket.c_str(), entry.bucket.size()) != 0) {
-    ldout(s->cct, 5) << "not logging op on bucket with non-utf8 name" << dendl;
+    ldpp_dout(s, 5) << "not logging op on bucket with non-utf8 name" << dendl;
     return 0;
   }
 
@@ -407,6 +430,8 @@ int rgw_log_op(rgw::sal::Store* store, RGWREST* const rest, struct req_state *s,
   entry.uri = std::move(uri);
 
   entry.op = op_name;
+
+  entry.identity_type = s->auth.identity->get_identity_type();
 
   if (! s->token_claims.empty()) {
     entry.token_claims = std::move(s->token_claims);
@@ -462,14 +487,14 @@ int rgw_log_op(rgw::sal::Store* store, RGWREST* const rest, struct req_state *s,
   if (s->cct->_conf->rgw_ops_log_rados) {
     string oid = render_log_object_name(s->cct->_conf->rgw_log_object_name, &bdt,
 				        entry.bucket_id, entry.bucket);
-    ret = store->log_op(oid, bl);
+    ret = store->log_op(s, oid, bl);
   }
 
   if (olog) {
     olog->log(entry);
   }
   if (ret < 0)
-    ldout(s->cct, 0) << "ERROR: failed to log entry" << dendl;
+    ldpp_dout(s, 0) << "ERROR: failed to log entry" << dendl;
 
   return ret;
 }

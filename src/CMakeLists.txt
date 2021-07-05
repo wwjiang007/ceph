@@ -380,6 +380,11 @@ if(WITH_SEASTAR)
   add_subdirectory(crimson)
 endif()
 
+include(CheckTypeSize)
+set(CMAKE_EXTRA_INCLUDE_FILES "sys/time.h")
+CHECK_TYPE_SIZE(suseconds_t SUSECONDS_T)
+unset(CMAKE_EXTRA_INCLUDE_FILES)
+
 set(libcommon_files
   ${CMAKE_BINARY_DIR}/src/include/ceph_ver.h
   ceph_ver.c
@@ -584,7 +589,8 @@ endif(${WITH_LTTNG})
 
 add_subdirectory(global)
 
-if(NOT WIN32)
+# RGW also support Lua scripting
+if(WITH_CEPHFS OR WITH_RADOSGW)
   find_package(Lua 5.3 REQUIRED)
 endif()
 
@@ -872,31 +878,7 @@ endif(WITH_KVS)
 
 if(WITH_RADOSGW)
   add_subdirectory(libkmip)
-
-  set(civetweb_common_files civetweb/src/civetweb.c)
-  add_library(civetweb_common_objs OBJECT ${civetweb_common_files})
-  target_include_directories(civetweb_common_objs SYSTEM PRIVATE
-	"${CMAKE_SOURCE_DIR}/src/civetweb/include")
-  set_property(TARGET civetweb_common_objs
-    APPEND PROPERTY COMPILE_DEFINITIONS USE_IPV6=1)
-  if (LIBSSL_SONAME)
-    set_property(TARGET civetweb_common_objs
-      APPEND PROPERTY COMPILE_DEFINITIONS SSL_LIB="${LIBSSL_SONAME}")
-    set_property(TARGET civetweb_common_objs
-      APPEND PROPERTY COMPILE_DEFINITIONS CRYPTO_LIB="${LIBCRYPTO_SONAME}")
-  endif()
-
-  if (OPENSSL_FOUND)
-    # Use cmake to determine openssl version, a TODO is to make
-    # civetweb itself do this based on openssl_api_compat strings
-    if (NOT (OPENSSL_VERSION VERSION_LESS "1.1"))
-      message(STATUS "Setting civetweb to use OPENSSL >= 1.1")
-      set_property(TARGET civetweb_common_objs
-        APPEND PROPERTY COMPILE_DEFINITIONS OPENSSL_API_1_1=1)
-    endif()
-  endif(OPENSSL_FOUND)
   add_subdirectory(rgw)
-
 endif(WITH_RADOSGW)
 
 install(FILES
@@ -909,7 +891,6 @@ configure_file(
   ${CMAKE_BINARY_DIR}/include/acconfig.h
 )
 
-if(NOT WIN32)
 # Everything you need to spin up a cluster with vstart.sh
 add_custom_target(vstart-base DEPENDS
     ceph-osd
@@ -918,14 +899,20 @@ add_custom_target(vstart-base DEPENDS
     ceph-conf
     monmaptool
     crushtool
-    rados
+    rados)
+if(NOT WIN32)
+  # WIN32 port does not build python bindings
+  # TODO: introduce an option for enabling python binding
+  add_dependencies(vstart-base
     cython_rados)
+endif()
+
 if (WITH_MGR)
   add_dependencies(vstart-base ceph-mgr)
 endif()
 
 add_custom_target(vstart DEPENDS vstart-base)
-if(WITH_RBD)
+if(WITH_RBD AND NOT WIN32)
   add_dependencies(vstart cython_rbd)
 endif()
 if (WITH_CEPHFS)
@@ -946,7 +933,6 @@ endif()
 if(WITH_MGR)
   add_dependencies(vstart ceph-volume-venv-setup)
 endif()
-endif(NOT WIN32)
 
 # Everything you need to run CephFS tests
 add_custom_target(cephfs_testing DEPENDS

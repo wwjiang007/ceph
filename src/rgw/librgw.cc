@@ -67,7 +67,6 @@
 #include <string>
 #include <mutex>
 
-
 #define dout_subsys ceph_subsys_rgw
 
 bool global_stop = false;
@@ -141,7 +140,7 @@ namespace rgw {
     }
   }
 
-  void RGWLibProcess::handle_request(RGWRequest* r)
+  void RGWLibProcess::handle_request(const DoutPrefixProvider *dpp, RGWRequest* r)
   {
     /*
      * invariant: valid requests are derived from RGWLibRequst
@@ -519,7 +518,7 @@ namespace rgw {
 
     common_init_finish(g_ceph_context);
 
-    rgw_tools_init(g_ceph_context);
+    rgw_tools_init(this, g_ceph_context);
 
     rgw_init_resolver();
     rgw::curl::setup_curl(boost::none);
@@ -541,8 +540,7 @@ namespace rgw {
       g_conf()->rgw_run_sync_thread &&
       g_conf()->rgw_nfs_run_sync_thread;
 
-    const DoutPrefix dp(cct.get(), dout_subsys, "librgw: ");
-    store = StoreManager::get_storage(&dp, g_ceph_context,
+    store = StoreManager::get_storage(this, g_ceph_context,
 					 "rados",
 					 run_gc,
 					 run_lc,
@@ -617,7 +615,7 @@ namespace rgw {
 
     fe->run();
 
-    r = store->register_to_service_map("rgw-nfs", service_map_meta);
+    r = store->register_to_service_map(this, "rgw-nfs", service_map_meta);
     if (r < 0) {
       derr << "ERROR: failed to register to service map: " << cpp_strerror(-r) << dendl;
       /* ignore error */
@@ -682,7 +680,7 @@ namespace rgw {
     const DoutPrefix dp(store->ctx(), dout_subsys, "librgw: ");
     std::unique_ptr<rgw::sal::User> user = store->get_user(uid);
     /* object exists, but policy is broken */
-    int ret = user->load_by_id(&dp, null_yield);
+    int ret = user->load_user(&dp, null_yield);
     if (ret < 0) {
       derr << "ERROR: failed reading user info: uid=" << uid << " ret="
 	   << ret << dendl;
@@ -693,11 +691,10 @@ namespace rgw {
 
   int RGWLibRequest::read_permissions(RGWOp* op, optional_yield y) {
     /* bucket and object ops */
-    const DoutPrefix dp(store->ctx(), dout_subsys, "librgw: ");
     int ret =
-      rgw_build_bucket_policies(&dp, rgwlib.get_store(), get_state(), y);
+      rgw_build_bucket_policies(op, rgwlib.get_store(), get_state(), y);
     if (ret < 0) {
-      ldpp_dout(&dp, 10) << "read_permissions (bucket policy) on "
+      ldpp_dout(op, 10) << "read_permissions (bucket policy) on "
 				  << get_state()->bucket << ":"
 				  << get_state()->object
 				  << " only_bucket=" << only_bucket()
@@ -706,10 +703,10 @@ namespace rgw {
 	ret = -EACCES;
     } else if (! only_bucket()) {
       /* object ops */
-      ret = rgw_build_object_policies(&dp, rgwlib.get_store(), get_state(),
+      ret = rgw_build_object_policies(op, rgwlib.get_store(), get_state(),
 				      op->prefetch_data(), y);
       if (ret < 0) {
-	ldpp_dout(&dp, 10) << "read_permissions (object policy) on"
+	ldpp_dout(op, 10) << "read_permissions (object policy) on"
 				    << get_state()->bucket << ":"
 				    << get_state()->object
 				    << " ret=" << ret << dendl;

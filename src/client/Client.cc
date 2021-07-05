@@ -145,6 +145,10 @@
 
 #define DEBUG_GETATTR_CAPS (CEPH_CAP_XATTR_SHARED)
 
+#ifndef S_IXUGO
+#define S_IXUGO	(S_IXUSR|S_IXGRP|S_IXOTH)
+#endif
+
 using namespace TOPNSPC::common;
 
 namespace bs = boost::system;
@@ -157,8 +161,8 @@ void client_flush_set_callback(void *p, ObjectCacher::ObjectSet *oset)
 }
 
 bool Client::is_reserved_vino(vinodeno_t &vino) {
-  if (vino.ino < MDS_INO_SYSTEM_BASE && vino.ino != MDS_INO_ROOT) {
-    ldout(cct, -1) << __func__ << "attempt to access reserved inode number " << vino << dendl;
+  if (MDS_IS_PRIVATE_INO(vino.ino)) {
+    ldout(cct, -1) << __func__ << " attempt to access reserved inode number " << vino << dendl;
     return true;
   }
   return false;
@@ -4551,7 +4555,7 @@ void Client::trim_caps(MetaSession *s, uint64_t max)
         ++q;
 	if (dn->lru_is_expireable()) {
 	  if (can_invalidate_dentries &&
-	      dn->dir->parent_inode->ino == MDS_INO_ROOT) {
+	      dn->dir->parent_inode->ino == CEPH_INO_ROOT) {
 	    // Only issue one of these per DN for inodes in root: handle
 	    // others more efficiently by calling for root-child DNs at
 	    // the end of this function.
@@ -4564,10 +4568,10 @@ void Client::trim_caps(MetaSession *s, uint64_t max)
 	  all = false;
         }
       }
-      if (in->ll_ref == 1 && in->ino != MDS_INO_ROOT) {
+      if (in->ll_ref == 1 && in->ino != CEPH_INO_ROOT) {
          _schedule_ino_release_callback(in.get());
       }
-      if (all && in->ino != MDS_INO_ROOT) {
+      if (all && in->ino != CEPH_INO_ROOT) {
         ldout(cct, 20) << __func__ << " counting as trimmed: " << *in << dendl;
 	trimmed++;
       }
@@ -4782,37 +4786,6 @@ void Client::early_kick_flushing_caps(MetaSession *session)
 
     kick_flushing_caps(in, session);
   }
-}
-
-void SnapRealm::build_snap_context()
-{
-  set<snapid_t> snaps;
-  snapid_t max_seq = seq;
-  
-  // start with prior_parents?
-  for (unsigned i=0; i<prior_parent_snaps.size(); i++)
-    snaps.insert(prior_parent_snaps[i]);
-
-  // current parent's snaps
-  if (pparent) {
-    const SnapContext& psnapc = pparent->get_snap_context();
-    for (unsigned i=0; i<psnapc.snaps.size(); i++)
-      if (psnapc.snaps[i] >= parent_since)
-	snaps.insert(psnapc.snaps[i]);
-    if (psnapc.seq > max_seq)
-      max_seq = psnapc.seq;
-  }
-
-  // my snaps
-  for (unsigned i=0; i<my_snaps.size(); i++)
-    snaps.insert(my_snaps[i]);
-
-  // ok!
-  cached_snap_context.seq = max_seq;
-  cached_snap_context.snaps.resize(0);
-  cached_snap_context.snaps.reserve(snaps.size());
-  for (set<snapid_t>::reverse_iterator p = snaps.rbegin(); p != snaps.rend(); ++p)
-    cached_snap_context.snaps.push_back(*p);
 }
 
 void Client::invalidate_snaprealm_and_children(SnapRealm *realm)
@@ -5602,8 +5575,12 @@ void Client::handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, const M
 
 int Client::inode_permission(Inode *in, const UserPerm& perms, unsigned want)
 {
-  if (perms.uid() == 0)
+  if (perms.uid() == 0) {
+    // Executable are overridable when there is at least one exec bit set
+    if((want & MAY_EXEC) && !(in->mode & S_IXUGO))
+      return -CEPHFS_EACCES;
     return 0;
+  }
   
   if (perms.uid() != in->uid && (in->mode & S_IRWXG)) {
     int ret = _posix_acl_permission(in, perms, want);
@@ -10797,7 +10774,7 @@ int Client::statfs(const char *path, struct statvfs *stbuf,
   if (data_pools.size() == 1) {
     objecter->get_fs_stats(stats, data_pools[0], &cond);
   } else {
-    objecter->get_fs_stats(stats, boost::optional<int64_t>(), &cond);
+    objecter->get_fs_stats(stats, std::optional<int64_t>(), &cond);
   }
 
   lock.unlock();
@@ -11227,11 +11204,11 @@ int Client::ll_statfs(Inode *in, struct statvfs *stbuf, const UserPerm& perms)
   return statfs(0, stbuf, perms);
 }
 
-void Client::ll_register_callbacks(struct ceph_client_callback_args *args)
+void Client::_ll_register_callbacks(struct ceph_client_callback_args *args)
 {
   if (!args)
     return;
-  std::scoped_lock l(client_lock);
+
   ldout(cct, 10) << __func__ << " cb " << args->handle
 		 << " invalidate_ino_cb " << args->ino_cb
 		 << " invalidate_dentry_cb " << args->dentry_cb
@@ -11261,6 +11238,23 @@ void Client::ll_register_callbacks(struct ceph_client_callback_args *args)
   }
   if (args->umask_cb)
     umask_cb = args->umask_cb;
+}
+
+// This is deprecated, use ll_register_callbacks2() instead.
+void Client::ll_register_callbacks(struct ceph_client_callback_args *args)
+{
+  ceph_assert(!is_mounting() && !is_mounted() && !is_unmounting());
+
+  _ll_register_callbacks(args);
+}
+
+int Client::ll_register_callbacks2(struct ceph_client_callback_args *args)
+{
+  if (is_mounting() || is_mounted() || is_unmounting())
+    return -CEPHFS_EBUSY;
+
+  _ll_register_callbacks(args);
+  return 0;
 }
 
 int Client::test_dentry_handling(bool can_invalidate)
@@ -12741,6 +12735,14 @@ size_t Client::_vxattrcb_snap_btime(Inode *in, char *val, size_t size)
       (long unsigned)in->snap_btime.nsec());
 }
 
+size_t Client::_vxattrcb_caps(Inode *in, char *val, size_t size)
+{
+  int issued;
+
+  in->caps_issued(&issued);
+  return snprintf(val, size, "%s/0x%x", ccap_string(issued).c_str(), issued);
+}
+
 bool Client::_vxattrcb_mirror_info_exists(Inode *in)
 {
   // checking one of the xattrs would suffice
@@ -12764,7 +12766,7 @@ size_t Client::_vxattrcb_cluster_fsid(Inode *in, char *val, size_t size)
 size_t Client::_vxattrcb_client_id(Inode *in, char *val, size_t size)
 {
   auto name = messenger->get_myname();
-  return snprintf(val, size, "%s%ld", name.type_str(), name.num());
+  return snprintf(val, size, "%s%" PRId64, name.type_str(), name.num());
 }
 
 #define CEPH_XATTR_NAME(_type, _name) "ceph." #_type "." #_name
@@ -12847,6 +12849,13 @@ const Client::VXattr Client::_dir_vxattrs[] = {
     exists_cb: &Client::_vxattrcb_mirror_info_exists,
     flags: 0,
   },
+  {
+    name: "ceph.caps",
+    getxattr_cb: &Client::_vxattrcb_caps,
+    readonly: true,
+    exists_cb: NULL,
+    flags: 0,
+  },
   { name: "" }     /* Required table terminator */
 };
 
@@ -12868,6 +12877,13 @@ const Client::VXattr Client::_file_vxattrs[] = {
     getxattr_cb: &Client::_vxattrcb_snap_btime,
     readonly: true,
     exists_cb: &Client::_vxattrcb_snap_btime_exists,
+    flags: 0,
+  },
+  {
+    name: "ceph.caps",
+    getxattr_cb: &Client::_vxattrcb_caps,
+    readonly: true,
+    exists_cb: NULL,
     flags: 0,
   },
   { name: "" }     /* Required table terminator */
@@ -14395,8 +14411,6 @@ int Client::ll_sync_inode(Inode *in, bool syncdataonly)
   return _fsync(in, syncdataonly);
 }
 
-#ifdef FALLOC_FL_PUNCH_HOLE
-
 int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
@@ -14518,15 +14532,6 @@ int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
   put_cap_ref(in, CEPH_CAP_FILE_WR);
   return r;
 }
-#else
-
-int Client::_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
-{
-  return -CEPHFS_EOPNOTSUPP;
-}
-
-#endif
-
 
 int Client::ll_fallocate(Fh *fh, int mode, int64_t offset, int64_t length)
 {
@@ -14965,7 +14970,7 @@ void Client::ms_handle_remote_reset(Connection *con)
       mds_rank_t mds = MDS_RANK_NONE;
       MetaSession *s = NULL;
       for (auto &p : mds_sessions) {
-	if (mdsmap->get_addrs(p.first) == con->get_peer_addrs()) {
+	if (mdsmap->have_inst(p.first) && mdsmap->get_addrs(p.first) == con->get_peer_addrs()) {
 	  mds = p.first;
 	  s = &p.second;
 	}

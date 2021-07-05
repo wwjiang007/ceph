@@ -16,6 +16,7 @@
 #ifndef CEPH_MEMSTORE_H
 #define CEPH_MEMSTORE_H
 
+#include <atomic>
 #include <mutex>
 #include <boost/intrusive_ptr.hpp>
 
@@ -31,7 +32,7 @@ public:
   struct Object : public RefCountedObject {
     ceph::mutex xattr_mutex{ceph::make_mutex("MemStore::Object::xattr_mutex")};
     ceph::mutex omap_mutex{ceph::make_mutex("MemStore::Object::omap_mutex")};
-    std::map<std::string,ceph::buffer::ptr> xattr;
+    std::map<std::string,ceph::buffer::ptr,std::less<>> xattr;
     ceph::buffer::list omap_header;
     std::map<std::string,ceph::buffer::list> omap;
 
@@ -195,7 +196,7 @@ private:
 
   Finisher finisher;
 
-  uint64_t used_bytes;
+  std::atomic<uint64_t> used_bytes;
 
   void _do_transaction(Transaction& t);
 
@@ -309,7 +310,7 @@ public:
   int getattr(CollectionHandle &c, const ghobject_t& oid, const char *name,
 	      ceph::buffer::ptr& value) override;
   int getattrs(CollectionHandle &c, const ghobject_t& oid,
-	       std::map<std::string,ceph::buffer::ptr>& aset) override;
+	       std::map<std::string,ceph::buffer::ptr,std::less<>>& aset) override;
 
   int list_collections(std::vector<coll_t>& ls) override;
 

@@ -745,7 +745,7 @@ public:
                                                                                  src_properties(_src_properties) {
   }
 
-  int init() override {
+  int init(const DoutPrefixProvider *dpp) override {
     /* init input connection */
 
 
@@ -764,15 +764,15 @@ public:
     }
 
     RGWRESTStreamRWRequest *in_req;
-    int ret = conn->get_obj(src_obj, req_params, false /* send */, &in_req);
+    int ret = conn->get_obj(dpp, src_obj, req_params, false /* send */, &in_req);
     if (ret < 0) {
-      ldout(sc->cct, 0) << "ERROR: " << __func__ << "(): conn->get_obj() returned ret=" << ret << dendl;
+      ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): conn->get_obj() returned ret=" << ret << dendl;
       return ret;
     }
 
     set_req(in_req);
 
-    return RGWStreamReadHTTPResourceCRF::init();
+    return RGWStreamReadHTTPResourceCRF::init(dpp);
   }
 
   int decode_rest_obj(map<string, string>& headers, bufferlist& extra_data) override {
@@ -967,7 +967,7 @@ public:
     }
   }
 
-  void send_ready(const rgw_rest_obj& rest_obj) override {
+  void send_ready(const DoutPrefixProvider *dpp, const rgw_rest_obj& rest_obj) override {
     RGWRESTStreamS3PutObj *r = static_cast<RGWRESTStreamS3PutObj *>(req);
 
     map<string, string> new_attrs;
@@ -979,7 +979,7 @@ public:
 
     RGWAccessControlPolicy policy;
 
-    r->send_ready(target->conn->get_key(), new_attrs, policy);
+    r->send_ready(dpp, target->conn->get_key(), new_attrs, policy);
   }
 
   void handle_headers(const map<string, string>& headers) {
@@ -1026,7 +1026,7 @@ public:
                                                    dest_obj(_dest_obj),
                                                    src_properties(_src_properties) {}
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
       /* init input */
       in_crf.reset(new RGWRESTStreamGetCRF(cct, get_env(), this, sc,
@@ -1087,7 +1087,7 @@ public:
                                                    part_info(_part_info),
                                                    petag(_petag) {}
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
       /* init input */
       in_crf.reset(new RGWRESTStreamGetCRF(cct, get_env(), this, sc,
@@ -1108,7 +1108,7 @@ public:
       }
 
       if (!(static_cast<RGWAWSStreamPutCRF *>(out_crf.get()))->get_etag(petag)) {
-        ldout(sc->cct, 0) << "ERROR: failed to get etag from PUT request" << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to get etag from PUT request" << dendl;
         return set_cr_error(-EIO);
       }
 
@@ -1136,7 +1136,7 @@ public:
                                                    dest_obj(_dest_obj),
                                                    upload_id(_upload_id) {}
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
 
       yield {
@@ -1147,7 +1147,7 @@ public:
       }
 
       if (retcode < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to abort multipart upload for dest object=" << dest_obj << " (retcode=" << retcode << ")" << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to abort multipart upload for dest object=" << dest_obj << " (retcode=" << retcode << ")" << dendl;
         return set_cr_error(retcode);
       }
 
@@ -1196,7 +1196,7 @@ public:
                                                    attrs(_attrs),
                                                    upload_id(_upload_id) {}
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
 
       yield {
@@ -1207,7 +1207,7 @@ public:
       }
 
       if (retcode < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to initialize multipart upload for dest object=" << dest_obj << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to initialize multipart upload for dest object=" << dest_obj << dendl;
         return set_cr_error(retcode);
       }
       {
@@ -1218,13 +1218,13 @@ public:
          */
         RGWXMLDecoder::XMLParser parser;
         if (!parser.init()) {
-          ldout(sc->cct, 0) << "ERROR: failed to initialize xml parser for parsing multipart init response from server" << dendl;
+          ldpp_dout(dpp, 0) << "ERROR: failed to initialize xml parser for parsing multipart init response from server" << dendl;
           return set_cr_error(-EIO);
         }
 
         if (!parser.parse(out_bl.c_str(), out_bl.length(), 1)) {
           string str(out_bl.c_str(), out_bl.length());
-          ldout(sc->cct, 5) << "ERROR: failed to parse xml: " << str << dendl;
+          ldpp_dout(dpp, 5) << "ERROR: failed to parse xml: " << str << dendl;
           return set_cr_error(-EIO);
         }
 
@@ -1232,12 +1232,12 @@ public:
           RGWXMLDecoder::decode_xml("InitiateMultipartUploadResult", result, &parser, true);
         } catch (RGWXMLDecoder::err& err) {
           string str(out_bl.c_str(), out_bl.length());
-          ldout(sc->cct, 5) << "ERROR: unexpected xml: " << str << dendl;
+          ldpp_dout(dpp, 5) << "ERROR: unexpected xml: " << str << dendl;
           return set_cr_error(-EIO);
         }
       }
 
-      ldout(sc->cct, 20) << "init multipart result: bucket=" << result.bucket << " key=" << result.key << " upload_id=" << result.upload_id << dendl;
+      ldpp_dout(dpp, 20) << "init multipart result: bucket=" << result.bucket << " key=" << result.key << " upload_id=" << result.upload_id << dendl;
 
       *upload_id = result.upload_id;
 
@@ -1298,7 +1298,7 @@ public:
                                                    upload_id(_upload_id),
                                                    req_enc(_parts) {}
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
 
       yield {
@@ -1318,7 +1318,7 @@ public:
       }
 
       if (retcode < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to initialize multipart upload for dest object=" << dest_obj << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to initialize multipart upload for dest object=" << dest_obj << dendl;
         return set_cr_error(retcode);
       }
       {
@@ -1329,13 +1329,13 @@ public:
          */
         RGWXMLDecoder::XMLParser parser;
         if (!parser.init()) {
-          ldout(sc->cct, 0) << "ERROR: failed to initialize xml parser for parsing multipart init response from server" << dendl;
+          ldpp_dout(dpp, 0) << "ERROR: failed to initialize xml parser for parsing multipart init response from server" << dendl;
           return set_cr_error(-EIO);
         }
 
         if (!parser.parse(out_bl.c_str(), out_bl.length(), 1)) {
           string str(out_bl.c_str(), out_bl.length());
-          ldout(sc->cct, 5) << "ERROR: failed to parse xml: " << str << dendl;
+          ldpp_dout(dpp, 5) << "ERROR: failed to parse xml: " << str << dendl;
           return set_cr_error(-EIO);
         }
 
@@ -1343,12 +1343,12 @@ public:
           RGWXMLDecoder::decode_xml("CompleteMultipartUploadResult", result, &parser, true);
         } catch (RGWXMLDecoder::err& err) {
           string str(out_bl.c_str(), out_bl.length());
-          ldout(sc->cct, 5) << "ERROR: unexpected xml: " << str << dendl;
+          ldpp_dout(dpp, 5) << "ERROR: unexpected xml: " << str << dendl;
           return set_cr_error(-EIO);
         }
       }
 
-      ldout(sc->cct, 20) << "complete multipart result: location=" << result.location << " bucket=" << result.bucket << " key=" << result.key << " etag=" << result.etag << dendl;
+      ldpp_dout(dpp, 20) << "complete multipart result: location=" << result.location << " bucket=" << result.bucket << " key=" << result.key << " etag=" << result.etag << dendl;
 
       return set_cr_done();
     }
@@ -1378,16 +1378,16 @@ public:
                                                             status_obj(_status_obj),
                                                             upload_id(_upload_id) {}
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
       yield call(new RGWAWSAbortMultipartCR(sc, dest_conn, dest_obj, upload_id));
       if (retcode < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to abort multipart upload dest obj=" << dest_obj << " upload_id=" << upload_id << " retcode=" << retcode << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to abort multipart upload dest obj=" << dest_obj << " upload_id=" << upload_id << " retcode=" << retcode << dendl;
         /* ignore error, best effort */
       }
       yield call(new RGWRadosRemoveCR(sc->env->store, status_obj));
       if (retcode < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to remove sync status obj obj=" << status_obj << " retcode=" << retcode << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to remove sync status obj obj=" << status_obj << " retcode=" << retcode << dendl;
         /* ignore error, best effort */
       }
       return set_cr_done();
@@ -1447,13 +1447,13 @@ public:
   }
 
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
-      yield call(new RGWSimpleRadosReadCR<rgw_sync_aws_multipart_upload_info>(sync_env->async_rados, sync_env->svc->sysobj,
+      yield call(new RGWSimpleRadosReadCR<rgw_sync_aws_multipart_upload_info>(dpp, sync_env->async_rados, sync_env->svc->sysobj,
                                                                  status_obj, &status, false));
 
       if (retcode < 0 && retcode != -ENOENT) {
-        ldout(sc->cct, 0) << "ERROR: failed to read sync status of object " << src_obj << " retcode=" << retcode << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to read sync status of object " << src_obj << " retcode=" << retcode << dendl;
         return retcode;
       }
 
@@ -1506,23 +1506,23 @@ public:
         }
 
         if (retcode < 0) {
-          ldout(sc->cct, 0) << "ERROR: failed to sync obj=" << src_obj << ", sync via multipart upload, upload_id=" << status.upload_id << " part number " << status.cur_part << " (error: " << cpp_strerror(-retcode) << ")" << dendl;
+          ldpp_dout(dpp, 0) << "ERROR: failed to sync obj=" << src_obj << ", sync via multipart upload, upload_id=" << status.upload_id << " part number " << status.cur_part << " (error: " << cpp_strerror(-retcode) << ")" << dendl;
           ret_err = retcode;
           yield call(new RGWAWSStreamAbortMultipartUploadCR(sc, target->conn.get(), dest_obj, status_obj, status.upload_id));
           return set_cr_error(ret_err);
         }
 
-        yield call(new RGWSimpleRadosWriteCR<rgw_sync_aws_multipart_upload_info>(sync_env->async_rados, sync_env->svc->sysobj, status_obj, status));
+        yield call(new RGWSimpleRadosWriteCR<rgw_sync_aws_multipart_upload_info>(dpp, sync_env->async_rados, sync_env->svc->sysobj, status_obj, status));
         if (retcode < 0) {
-          ldout(sc->cct, 0) << "ERROR: failed to store multipart upload state, retcode=" << retcode << dendl;
+          ldpp_dout(dpp, 0) << "ERROR: failed to store multipart upload state, retcode=" << retcode << dendl;
           /* continue with upload anyway */
         }
-        ldout(sc->cct, 20) << "sync of object=" << src_obj << " via multipart upload, finished sending part #" << status.cur_part << " etag=" << pcur_part_info->etag << dendl;
+        ldpp_dout(dpp, 20) << "sync of object=" << src_obj << " via multipart upload, finished sending part #" << status.cur_part << " etag=" << pcur_part_info->etag << dendl;
       }
 
       yield call(new RGWAWSCompleteMultipartCR(sc, target->conn.get(), dest_obj, status.upload_id, status.parts));
       if (retcode < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to complete multipart upload of obj=" << src_obj << " (error: " << cpp_strerror(-retcode) << ")" << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to complete multipart upload of obj=" << src_obj << " (error: " << cpp_strerror(-retcode) << ")" << dendl;
         ret_err = retcode;
         yield call(new RGWAWSStreamAbortMultipartUploadCR(sc, target->conn.get(), dest_obj, status_obj, status.upload_id));
         return set_cr_error(ret_err);
@@ -1531,7 +1531,7 @@ public:
       /* remove status obj */
       yield call(new RGWRadosRemoveCR(sync_env->store, status_obj));
       if (retcode < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to abort multipart upload obj=" << src_obj << " upload_id=" << status.upload_id << " part number " << status.cur_part << " (" << cpp_strerror(-retcode) << ")" << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to abort multipart upload obj=" << src_obj << " upload_id=" << status.upload_id << " part number " << status.cur_part << " (" << cpp_strerror(-retcode) << ")" << dendl;
         /* ignore error, best effort */
       }
       return set_cr_done();
@@ -1604,19 +1604,19 @@ public:
   ~RGWAWSHandleRemoteObjCBCR(){
   }
 
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
       ret = decode_attr(attrs, RGW_ATTR_PG_VER, &src_pg_ver, (uint64_t)0);
       if (ret < 0) {
-        ldout(sc->cct, 0) << "ERROR: failed to decode pg ver attr, ignoring" << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: failed to decode pg ver attr, ignoring" << dendl;
       } else {
         ret = decode_attr(attrs, RGW_ATTR_SOURCE_ZONE, &src_zone_short_id, (uint32_t)0);
         if (ret < 0) {
-          ldout(sc->cct, 0) << "ERROR: failed to decode source zone short_id attr, ignoring" << dendl;
+          ldpp_dout(dpp, 0) << "ERROR: failed to decode source zone short_id attr, ignoring" << dendl;
           src_pg_ver = 0; /* all or nothing */
         }
       }
-      ldout(sc->cct, 4) << "AWS: download begin: z=" << sc->source_zone
+      ldpp_dout(dpp, 4) << "AWS: download begin: z=" << sc->source_zone
                               << " b=" << src_bucket << " k=" << key << " size=" << size
                               << " mtime=" << mtime << " etag=" << etag
                               << " zone_short_id=" << src_zone_short_id << " pg_ver=" << src_pg_ver
@@ -1624,7 +1624,7 @@ public:
 
       source_conn = sync_env->svc->zone->get_zone_conn(sc->source_zone);
       if (!source_conn) {
-        ldout(sc->cct, 0) << "ERROR: cannot find http connection to zone " << sc->source_zone << dendl;
+        ldpp_dout(dpp, 0) << "ERROR: cannot find http connection to zone " << sc->source_zone << dendl;
         return set_cr_error(-EINVAL);
       }
 
@@ -1633,7 +1633,7 @@ public:
 
       if (bucket_created.find(target_bucket_name) == bucket_created.end()){
         yield {
-          ldout(sc->cct,0) << "AWS: creating bucket " << target_bucket_name << dendl;
+          ldpp_dout(dpp, 0) << "AWS: creating bucket " << target_bucket_name << dendl;
           bufferlist bl;
           call(new RGWPutRawRESTResourceCR <bufferlist> (sc->cct, target->conn.get(),
                                                   sync_env->http_manager,
@@ -1642,13 +1642,13 @@ public:
         if (retcode < 0 ) {
           RGWXMLDecoder::XMLParser parser;
           if (!parser.init()) {
-            ldout(sc->cct, 0) << "ERROR: failed to initialize xml parser for parsing multipart init response from server" << dendl;
+            ldpp_dout(dpp, 0) << "ERROR: failed to initialize xml parser for parsing multipart init response from server" << dendl;
             return set_cr_error(retcode);
           }
 
           if (!parser.parse(out_bl.c_str(), out_bl.length(), 1)) {
             string str(out_bl.c_str(), out_bl.length());
-            ldout(sc->cct, 5) << "ERROR: failed to parse xml: " << str << dendl;
+            ldpp_dout(dpp, 5) << "ERROR: failed to parse xml: " << str << dendl;
             return set_cr_error(retcode);
           }
 
@@ -1656,7 +1656,7 @@ public:
             RGWXMLDecoder::decode_xml("Error", result, &parser, true);
           } catch (RGWXMLDecoder::err& err) {
             string str(out_bl.c_str(), out_bl.length());
-            ldout(sc->cct, 5) << "ERROR: unexpected xml: " << str << dendl;
+            ldpp_dout(dpp, 5) << "ERROR: unexpected xml: " << str << dendl;
             return set_cr_error(retcode);
           }
 
@@ -1696,7 +1696,7 @@ public:
           rgw_rest_obj rest_obj;
           rest_obj.init(key);
           if (do_decode_rest_obj(sc->cct, attrs, headers, &rest_obj)) {
-            ldout(sc->cct, 0) << "ERROR: failed to decode rest obj out of headers=" << headers << ", attrs=" << attrs << dendl;
+            ldpp_dout(dpp, 0) << "ERROR: failed to decode rest obj out of headers=" << headers << ", attrs=" << attrs << dendl;
             return set_cr_error(-EINVAL);
           }
           call(new RGWAWSStreamObjToCloudMultipartCR(sc, sync_pipe, instance.conf, source_conn, &src_obj,
@@ -1747,14 +1747,14 @@ public:
                           AWSSyncInstanceEnv& _instance) : RGWCoroutine(_sc->cct), sc(_sc),
                                                         sync_pipe(_sync_pipe), key(_key),
                                                         mtime(_mtime), instance(_instance) {}
-  int operate() override {
+  int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
-      ldout(sc->cct, 0) << ": remove remote obj: z=" << sc->source_zone
+      ldpp_dout(dpp, 0) << ": remove remote obj: z=" << sc->source_zone
                               << " b=" <<sync_pipe.info.source_bs.bucket << " k=" << key << " mtime=" << mtime << dendl;
       yield {
         instance.get_profile(sync_pipe.info.source_bs.bucket, &target);
         string path =  instance.conf.get_path(target, sync_pipe.dest_bucket_info, key);
-        ldout(sc->cct, 0) << "AWS: removing aws object at" << path << dendl;
+        ldpp_dout(dpp, 0) << "AWS: removing aws object at" << path << dendl;
 
         call(new RGWDeleteRESTResourceCR(sc->cct, target->conn.get(),
                                          sc->env->http_manager,

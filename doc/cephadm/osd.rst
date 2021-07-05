@@ -211,6 +211,7 @@ If you want to avoid this behavior (disable automatic creation of OSD on availab
 
 * For cephadm, see also :ref:`cephadm-spec-unmanaged`.
 
+.. _cephadm-osd-removal:
 
 Remove an OSD
 =============
@@ -268,7 +269,7 @@ It is possible to stop queued OSD removals by using the following command:
 
 .. prompt:: bash #
 
-  ceph orch osd rm stop <svc_id(s)>
+  ceph orch osd rm stop <osd_id(s)>
 
 Example:
 
@@ -288,7 +289,7 @@ Replacing an OSD
 
 .. prompt:: bash #
 
-  orch osd rm <svc_id(s)> --replace [--force]
+  orch osd rm <osd_id(s)> --replace [--force]
 
 Example:
 
@@ -361,6 +362,52 @@ Example command:
     ``all-available-devices`` option when creating OSDs, when you ``zap`` a
     device the cephadm orchestrator automatically creates a new OSD in the
     device.  To disable this behavior, see :ref:`cephadm-osd-declarative`.
+
+
+.. _osd_autotune:
+
+Automatically tuning OSD memory
+===============================
+
+OSD daemons will adjust their memory consumption based on the
+``osd_memory_target`` config option (several gigabytes, by
+default).  If Ceph is deployed on dedicated nodes that are not sharing
+memory with other services, cephadm can automatically adjust the per-OSD
+memory consumption based on the total amount of RAM and the number of deployed
+OSDs.
+
+This option is enabled globally with::
+
+  ceph config set osd osd_memory_target_autotune true
+
+Cephadm will start with a fraction
+(``mgr/cephadm/autotune_memory_target_ratio``, which defaults to
+``.7``) of the total RAM in the system, subtract off any memory
+consumed by non-autotuned daemons (non-OSDs, for OSDs for which
+``osd_memory_target_autotune`` is false), and then divide by the
+remaining OSDs.
+
+The final targets are reflected in the config database with options like::
+
+  WHO   MASK      LEVEL   OPTION              VALUE
+  osd   host:foo  basic   osd_memory_target   126092301926
+  osd   host:bar  basic   osd_memory_target   6442450944
+
+Both the limits and the current memory consumed by each daemon are visible from
+the ``ceph orch ps`` output in the ``MEM LIMIT`` column::
+
+  NAME        HOST  PORTS  STATUS         REFRESHED  AGE  MEM USED  MEM LIMIT  VERSION                IMAGE ID      CONTAINER ID  
+  osd.1       dael         running (3h)     10s ago   3h    72857k     117.4G  17.0.0-3781-gafaed750  7015fda3cd67  9e183363d39c  
+  osd.2       dael         running (81m)    10s ago  81m    63989k     117.4G  17.0.0-3781-gafaed750  7015fda3cd67  1f0cc479b051  
+  osd.3       dael         running (62m)    10s ago  62m    64071k     117.4G  17.0.0-3781-gafaed750  7015fda3cd67  ac5537492f27  
+
+To exclude an OSD from memory autotuning, disable the autotune option
+for that OSD and also set a specific memory target.  For example,
+
+  .. prompt:: bash #
+
+    ceph config set osd.123 osd_memory_target_autotune false
+    ceph config set osd.123 osd_memory_target 16G
 
 
 .. _drivegroups:

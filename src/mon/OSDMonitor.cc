@@ -3181,8 +3181,9 @@ bool OSDMonitor::check_failures(utime_t now)
   auto p = failure_info.begin();
   while (p != failure_info.end()) {
     auto& [target_osd, fi] = *p;
-    if (can_mark_down(target_osd)) {
-      found_failure |= check_failure(now, target_osd, fi);
+    if (can_mark_down(target_osd) &&
+	check_failure(now, target_osd, fi)) {
+      found_failure = true;
       ++p;
     } else if (is_failure_stale(now, fi)) {
       dout(10) << " dropping stale failure_info for osd." << target_osd
@@ -5423,8 +5424,7 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
   string prefix;
   cmd_getval(cmdmap, "prefix", prefix);
 
-  string format;
-  cmd_getval(cmdmap, "format", format, string("plain"));
+  string format = cmd_getval_or<string>(cmdmap, "format", "plain");
   boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   if (prefix == "osd stat") {
@@ -5447,11 +5447,7 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	   prefix == "osd ls-tree" ||
 	   prefix == "osd info") {
 
-    epoch_t epoch = 0;
-    int64_t epochnum;
-    cmd_getval(cmdmap, "epoch", epochnum, (int64_t)osdmap.get_epoch());
-    epoch = epochnum;
-    
+    epoch_t epoch = cmd_getval_or<int64_t>(cmdmap, "epoch", osdmap.get_epoch());
     bufferlist osdmap_bl;
     int err = get_version_full(epoch, osdmap_bl);
     if (err == -ENOENT) {
@@ -6656,9 +6652,14 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
     rs << "\n";
     rdata.append(rs.str());
   } else if (prefix == "osd crush tree") {
-    string shadow;
-    cmd_getval(cmdmap, "shadow", shadow);
-    bool show_shadow = shadow == "--show-shadow";
+    bool show_shadow = false;
+    if (!cmd_getval_compat_cephbool(cmdmap, "show_shadow", show_shadow)) {
+      std::string shadow;
+      if (cmd_getval(cmdmap, "shadow", shadow) &&
+	  shadow == "--show-shadow") {
+	show_shadow = true;
+      }
+    }
     boost::scoped_ptr<Formatter> f(Formatter::create(format));
     if (f) {
       f->open_object_section("crush_tree");
@@ -7679,6 +7680,43 @@ int OSDMonitor::prepare_pool_stripe_width(const unsigned pool_type,
   return err;
 }
 
+int OSDMonitor::get_replicated_stretch_crush_rule()
+{
+  /* we don't write down the stretch rule anywhere, so
+   * we have to guess it. How? Look at all the pools
+   * and count up how many times a given rule is used
+   * on stretch pools and then return the one with
+   * the most users!
+   */
+  map<int,int> rule_counts;
+  for (const auto& pooli : osdmap.pools) {
+    const pg_pool_t& p = pooli.second;
+    if (p.is_replicated() && p.is_stretch_pool()) {
+      if (!rule_counts.count(p.crush_rule)) {
+	rule_counts[p.crush_rule] = 1;
+      } else {
+	++rule_counts[p.crush_rule];
+      }
+    }
+  }
+
+  if (rule_counts.empty()) {
+    return -ENOENT;
+  }
+
+  int most_used_count = 0;
+  int most_used_rule = -1;
+  for (auto i : rule_counts) {
+    if (i.second > most_used_count) {
+      most_used_rule = i.first;
+      most_used_count = i.second;
+    }
+  }
+  ceph_assert(most_used_count > 0);
+  ceph_assert(most_used_rule >= 0);
+  return most_used_rule;
+}
+
 int OSDMonitor::prepare_pool_crush_rule(const unsigned pool_type,
 					const string &erasure_code_profile,
 					const string &rule_name,
@@ -7691,8 +7729,12 @@ int OSDMonitor::prepare_pool_crush_rule(const unsigned pool_type,
     case pg_pool_t::TYPE_REPLICATED:
       {
 	if (rule_name == "") {
-	  // Use default rule
-	  *crush_rule = osdmap.crush->get_osd_pool_default_crush_replicated_ruleset(cct);
+	  if (osdmap.stretch_mode_enabled) {
+	    *crush_rule = get_replicated_stretch_crush_rule();
+	  } else {
+	    // Use default rule
+	    *crush_rule = osdmap.crush->get_osd_pool_default_crush_replicated_ruleset(cct);
+	  }
 	  if (*crush_rule < 0) {
 	    // Errors may happen e.g. if no valid rule is available
 	    *ss << "No suitable CRUSH rule exists, check "
@@ -7829,8 +7871,17 @@ int OSDMonitor::prepare_new_pool(string& name,
 {
   if (name.length() == 0)
     return -EINVAL;
-  if (pg_num == 0)
-    pg_num = g_conf().get_val<uint64_t>("osd_pool_default_pg_num");
+  if (pg_num == 0) {
+    auto pg_num_from_mode =
+      [pg_num=g_conf().get_val<uint64_t>("osd_pool_default_pg_num")]
+      (const string& mode) {
+      return mode == "on" ? 1 : pg_num;
+    };
+    pg_num = pg_num_from_mode(
+      pg_autoscale_mode.empty() ?
+      g_conf().get_val<string>("osd_pool_default_pg_autoscale_mode") :
+      pg_autoscale_mode);
+  }
   if (pgp_num == 0)
     pgp_num = g_conf().get_val<uint64_t>("osd_pool_default_pgp_num");
   if (!pgp_num)
@@ -9682,8 +9733,7 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
   bufferlist rdata;
   int err = 0;
 
-  string format;
-  cmd_getval(cmdmap, "format", format, string("plain"));
+  string format = cmd_getval_or<string>(cmdmap, "format", "plain");
   boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   string prefix;
@@ -12510,9 +12560,8 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       }
       if (blocklistop == "add") {
 	utime_t expires = ceph_clock_now();
-	double d;
 	// default one hour
-	cmd_getval(cmdmap, "expire", d,
+	double d = cmd_getval_or<double>(cmdmap, "expire",
           g_conf()->mon_osd_blocklist_default_expire);
 	expires += d;
 
@@ -12634,12 +12683,9 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 					      get_last_committed() + 1));
     return true;
   } else if (prefix == "osd pool create") {
-    int64_t pg_num, pg_num_min;
-    int64_t pgp_num;
-    cmd_getval(cmdmap, "pg_num", pg_num, int64_t(0));
-    cmd_getval(cmdmap, "pgp_num", pgp_num, pg_num);
-    cmd_getval(cmdmap, "pg_num_min", pg_num_min, int64_t(0));
-
+    int64_t pg_num = cmd_getval_or<int64_t>(cmdmap, "pg_num", 0);
+    int64_t pg_num_min = cmd_getval_or<int64_t>(cmdmap, "pg_num_min", 0);
+    int64_t pgp_num = cmd_getval_or<int64_t>(cmdmap, "pgp_num", pg_num);
     string pool_type_str;
     cmd_getval(cmdmap, "pool_type", pool_type_str);
     if (pool_type_str.empty())
@@ -12710,8 +12756,8 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 	  rule_name = poolstr;
 	}
       }
-      cmd_getval(cmdmap, "expected_num_objects",
-                 expected_num_objects, int64_t(0));
+      expected_num_objects =
+	cmd_getval_or<int64_t>(cmdmap, "expected_num_objects", 0);
     } else {
       //NOTE:for replicated pool,cmd_map will put rule_name to erasure_code_profile field
       //     and put expected_num_objects to rule field
@@ -12727,8 +12773,8 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
         }
         rule_name = erasure_code_profile;
       } else { // cmd is well-formed
-        cmd_getval(cmdmap, "expected_num_objects",
-                   expected_num_objects, int64_t(0));
+        expected_num_objects =
+	  cmd_getval_or<int64_t>(cmdmap, "expected_num_objects", 0);
       }
     }
 
@@ -12784,8 +12830,7 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       }
     }
 
-    int64_t fast_read_param;
-    cmd_getval(cmdmap, "fast_read", fast_read_param, int64_t(-1));
+    int64_t fast_read_param = cmd_getval_or<int64_t>(cmdmap, "fast_read", -1);
     FastReadType fast_read = FAST_READ_DEFAULT;
     if (fast_read_param == 0)
       fast_read = FAST_READ_OFF;
@@ -12952,11 +12997,11 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
     }
 
     // make sure new tier is empty
-    string force_nonempty;
-    cmd_getval(cmdmap, "force_nonempty", force_nonempty);
+    bool force_nonempty = false;
+    cmd_getval_compat_cephbool(cmdmap, "force_nonempty", force_nonempty);
     const pool_stat_t *pstats = mon.mgrstatmon()->get_pool_stat(tierpool_id);
     if (pstats && pstats->stats.sum.num_objects != 0 &&
-	force_nonempty != "--force-nonempty") {
+	!force_nonempty) {
       ss << "tier pool '" << tierpoolstr << "' is not empty; --force-nonempty to force";
       err = -ENOTEMPTY;
       goto reply;
@@ -12968,8 +13013,8 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       goto reply;
     }
     if ((!tp->removed_snaps.empty() || !tp->snaps.empty()) &&
-	((force_nonempty != "--force-nonempty") ||
-	 (!g_conf()->mon_debug_unsafe_allow_tier_with_nonempty_snaps))) {
+	(!force_nonempty ||
+	 !g_conf()->mon_debug_unsafe_allow_tier_with_nonempty_snaps)) {
       ss << "tier pool '" << tierpoolstr << "' has snapshot state; it cannot be added as a tier without breaking the pool";
       err = -ENOTEMPTY;
       goto reply;

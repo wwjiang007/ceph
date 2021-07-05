@@ -323,7 +323,7 @@ namespace rgw {
 
     int rc = rgwlib.get_fe()->execute_req(&req);
     if ((rc == 0) &&
-	(req.get_ret() == 0)) {
+        ((rc = req.get_ret()) == 0)) {
       lock_guard guard(rgw_fh->mtx);
       rgw_fh->set_atime(real_clock::to_timespec(real_clock::now()));
       *bytes_read = req.nread;
@@ -345,7 +345,7 @@ namespace rgw {
 
     int rc = rgwlib.get_fe()->execute_req(&req);
     if ((rc == 0) &&
-        (req.get_ret() == 0)) {
+        ((rc = req.get_ret()) == 0)) {
       lock_guard(rgw_fh->mtx);
       rgw_fh->set_atime(real_clock::to_timespec(real_clock::now()));
       *bytes_read = req.nread;
@@ -1868,7 +1868,7 @@ namespace rgw {
       return -EIO;
     }
 
-    op_ret = state->bucket->check_quota(user_quota, bucket_quota, real_ofs, null_yield, true);
+    op_ret = state->bucket->check_quota(this, user_quota, bucket_quota, real_ofs, null_yield, true);
     /* max_size exceed */
     if (op_ret < 0)
       return -EIO;
@@ -1910,7 +1910,7 @@ namespace rgw {
       goto done;
     }
 
-    op_ret = state->bucket->check_quota(user_quota, bucket_quota, state->obj_size, null_yield, true);
+    op_ret = state->bucket->check_quota(this, user_quota, bucket_quota, state->obj_size, null_yield, true);
     /* max_size exceed */
     if (op_ret < 0) {
       goto done;
@@ -1957,7 +1957,7 @@ namespace rgw {
       attrbl.append(val.c_str(), val.size() + 1);
     }
 
-    op_ret = rgw_get_request_metadata(state->cct, state->info, attrs);
+    op_ret = rgw_get_request_metadata(this, state->cct, state->info, attrs);
     if (op_ret < 0) {
       goto done;
     }
