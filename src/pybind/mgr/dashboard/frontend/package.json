@@ -104,7 +104,7 @@
     "rxjs": "6.6.3",
     "simplebar-angular": "2.3.6",
     "swagger-ui": "4.12.0",
-    "tslib": "2.3.1"
+    "tslib": "2.4.0"
   },
   "devDependencies": {
     "@angular-devkit/build-angular": "12.2.16",
